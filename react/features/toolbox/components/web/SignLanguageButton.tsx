@@ -859,7 +859,7 @@ const SignLanguageOverlay: React.FC<OverlayProps> = ({ subtitles, error, t, isLi
       <span className="prediction-text">{predictions}</span>
       {predictions.length > 0 && (
         <button className="clear-button" onClick={handleClear}>
-          {t('Clear')}
+          {t('Translation Clear')}
         </button>
       )}
     </div>
