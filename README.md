@@ -21,7 +21,8 @@ While tools like Zoom and Microsoft Teams excel in text and voice communication,
 
 ## 🧩 Demo
 
-https://github.com/user-attachments/assets/82eed43a-424c-4849-935b-f63aba4ae0bd
+https://github.com/user-attachments/assets/6e72e9d0-24b4-4031-8f77-e6be26ad2fa0
+
 
 
 
