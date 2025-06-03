@@ -1,87 +1,47 @@
-# <p align="center">Jitsi Meet</p>
+# <p align="center">SignSync: Sign Language Translation for Video Conferencing</p>
 
-Jitsi Meet is a set of Open Source projects which empower users to use and deploy
-video conferencing platforms with state-of-the-art video quality and features.
+## 🧩 Overview
+SignSync is an innovative real-time sign language translation tool integrated directly into the open-source video conferencing platform Jitsi. It bridges the communication gap between the Deaf and Hard of Hearing (D/HH) community and the general public by making sign language visible, understandable, and inclusive during online meetings.
 
-<hr />
+Imagine you have lost your voice—how will you express your thoughts and communicate with those around you? This is a daily dilemma for the D/HH community.
 
-<p align="center">
-<img src="https://raw.githubusercontent.com/jitsi/jitsi-meet/master/readme-img1.png" width="900" />
-</p>
+While sign language is widely used within the D/HH community, over 95% of the hearing population is unfamiliar with it, leading to communication barriers in schools, workplaces, and social settings.
 
-<hr />
+As part of an inclusive future, SignSync empowers the D/HH community by allowing their expressions to be translated in real time and understood by everyone in a video call.
 
-Amongst others here are the main features Jitsi Meet offers:
+## 🚀 Features
+🤟 Real-time Sign Language Recognition
+Translates sign gestures into readable text using a deep learning model (CNN-based).
 
-* Support for all current browsers
-* Mobile applications
-* Web and native SDKs for integration
-* HD audio and video
-* Content sharing
-* Raise hand and reactions
-* Chat with private conversations
-* Polls
-* Virtual backgrounds
+📡 Seamless Jitsi Integration
+Embedded into the Jitsi interface with no need for separate software.
 
-And many more!
+🌍 Privacy-Conscious
+All processing can run locally without uploading sensitive data to external servers.
 
-## Using Jitsi Meet
+🖥️ Cross-Platform
+Works on modern web browsers across operating systems.
 
-Using Jitsi Meet is straightforward, as it's browser based. Head over to [meet.jit.si](https://meet.jit.si) and give it a try. It's scalable and free to use. All you need is a Google, Facebook or GitHub account in order to start a meeting. All browsers are supported!
+## 🛠️ Tech Stack
+Frontend: JavaScript, React (Jitsi Meet UI)
 
-Using mobile? No problem, you can either use your mobile web browser or our fully-featured
-mobile apps:
+Backend/ML: Python, OpenCV, PyTorch/TensorFlow
 
-| Android | Android (F-Droid) | iOS |
-|:-:|:-:|:-:|
-| [<img src="resources/img/google-play-badge.png" height="50">](https://play.google.com/store/apps/details?id=org.jitsi.meet) | [<img src="resources/img/f-droid-badge.png" height="50">](https://f-droid.org/packages/org.jitsi.meet/) | [<img src="resources/img/appstore-badge.png" height="50">](https://itunes.apple.com/us/app/jitsi-meet/id1165103905) |
+Model: Mediapipe for landmakr extraction + CNN-based Sign Language Translation for fingerspelling
 
-If you are feeling adventurous and want to get an early scoop of the features as they are being
-developed you can also sign up for our open beta testing here:
+## 🧪 Demo
 
-* [Android](https://play.google.com/apps/testing/org.jitsi.meet)
-* [iOS](https://testflight.apple.com/join/isy6ja7S)
+## 🧠 How It Works
+The webcam captures sign gestures from the user.
 
-## Running your own instance
+Mediapipe hands is called to extract hand landmarks.
 
-If you'd like to run your own Jitsi Meet installation head over to the [handbook](https://jitsi.github.io/handbook/docs/devops-guide/) to get started.
+Extracted landmarks are being detected by model hosted on frontend device.
 
-We provide Debian packages and a comprehensive Docker setup to make deployments as simple as possible.
-Advanced users also have the possibility of building all the components from source.
+Calling Gemini API to separate glued text and correct wrong words.
 
-You can check the latest releases [here](https://jitsi.github.io/handbook/docs/releases).
+Display translated text on subtitle overlay.
 
-## Jitsi as a Service
+## 🙌 Why It Matters
+By making video communication accessible to the D/HH community, SignSync doesn’t just enable conversation—it promotes inclusion, equity, and visibility.
 
-If you like the branding capabilities of running your own instance but you'd like
-to avoid dealing with the complexity of monitoring, scaling and updates, JaaS might be
-for you.
-
-[8x8 Jitsi as a Service (JaaS)](https://jaas.8x8.vc) is an enterprise-ready video meeting platform that allows developers, organizations and businesses to easily build and deploy video solutions. With Jitsi as a Service we now give you all the power of Jitsi running on our global platform so you can focus on building secure and branded video experiences.
-
-## Documentation
-
-All the Jitsi Meet documentation is available in [the handbook](https://jitsi.github.io/handbook/).
-
-## Security
-
-For a comprehensive description of all Jitsi Meet's security aspects, please check [this link](https://jitsi.org/security).
-
-For a detailed description of Jitsi Meet's End-to-End Encryption (E2EE) implementation,
-please check [this link](https://jitsi.org/e2ee-whitepaper/).
-
-For information on reporting security vulnerabilities in Jitsi Meet, see [SECURITY.md](./SECURITY.md).
-
-## Contributing
-
-If you are looking to contribute to Jitsi Meet, first of all, thank you! Please
-see our [guidelines for contributing](CONTRIBUTING.md).
-
-<br />
-<br />
-
-<footer>
-<p align="center" style="font-size: smaller;">
-Built with ❤️ by the Jitsi team at <a href="https://8x8.com" target="_blank">8x8</a> and our community.
-</p>
-</footer>
