@@ -19,6 +19,12 @@ As part of an inclusive future, SignSync empowers the D/HH community by allowing
 
 While tools like Zoom and Microsoft Teams excel in text and voice communication, they lack built-in support for real-time sign language interpretation. That’s the gap we’re aiming to bridge.
 
+## 🧩 Demo
+
+https://github.com/user-attachments/assets/82eed43a-424c-4849-935b-f63aba4ae0bd
+
+
+
 ## 🚀 Features
 🤟 Real-time Sign Language Recognition
 Translates sign gestures into readable text using a deep learning model (CNN-based).
