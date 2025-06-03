@@ -15,6 +15,8 @@ Imagine you have lost your voice—how will you express your thoughts and commun
 
 While sign language is widely used within the D/HH community, over 95% of the hearing population is unfamiliar with it, leading to communication barriers in schools, workplaces, and social settings.
 
+Video conferencing tools such as Google Meet or Zoom provide powerful communication capabilities, but none of them provided support for sign language translation features. 
+
 As part of an inclusive future, SignSync empowers the D/HH community by allowing their expressions to be translated in real time and understood by everyone in a video call.
 
 ## 🚀 Features
