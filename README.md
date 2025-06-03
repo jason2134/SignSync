@@ -1,5 +1,9 @@
 # <p align="center">SignSync: Sign Language Translation for Video Conferencing</p>
 
+<video controls>
+  <source src="https://raw.githubusercontent.com/jason2134/SignSync/main/SignSync.mp4" type="video/mp4">
+</video>
+
 ## 🧩 Overview
 SignSync is an innovative real-time sign language translation tool integrated directly into the open-source video conferencing platform Jitsi. It bridges the communication gap between the Deaf and Hard of Hearing (D/HH) community and the general public by making sign language visible, understandable, and inclusive during online meetings.
 
