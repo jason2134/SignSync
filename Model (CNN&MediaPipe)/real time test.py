@@ -225,7 +225,7 @@ predictions = []
 threshold = 0.9
 
 # Load your trained model
-model = tf.keras.models.load_model('new model.h5')  # Ensure 'best_model.keras' is your trained model
+model = tf.keras.models.load_model('best_model.h5')  # Ensure 'best_model.keras' is your trained model
 
 cap = cv2.VideoCapture(0)
 
