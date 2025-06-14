@@ -105,80 +105,41 @@ const extractKeypoints = (results: HandResults | null): KeypointFrame => {
  * Centers each hand by wrist (landmark 0), scales by middle finger MCP (landmark 9).
  * Returns zeros for undetected hands or invalid scaling.
  */
-const normalizeKeypoints = (sequence: KeypointSequence): KeypointSequence => {
-  const normalizedSequence: KeypointSequence = [];
+const normalizeKeypoints = (sequence: number[][]): number[][] => {
+  // Validate input
+  const expectedLength = 126; // 42 landmarks * 3 coords (x, y, z)
+  if (!Array.isArray(sequence) || sequence.some(frame => frame.length !== expectedLength)) {
+    throw new Error(`Invalid sequence: each frame must have ${expectedLength} elements`);
+  }
+
+  const normalizedSequence: number[][] = []; // Explicitly type as number[][]
 
   for (const frame of sequence) {
-    if (frame.length !== KEYPOINTS_PER_FRAME) {
-      throw new Error(`Invalid frame length: expected ${KEYPOINTS_PER_FRAME}, got ${frame.length}`);
+    // Reshape frame to (42 landmarks, 3 coords)
+    const reshapedFrame: number[][] = [];
+    for (let i = 0; i < 42; i++) {
+      const base = i * 3;
+      reshapedFrame.push([frame[base], frame[base + 1], frame[base + 2]]);
     }
 
-    const normalizedFrame = new Array(KEYPOINTS_PER_FRAME).fill(0) as KeypointFrame;
+    // Compute wrist midpoint
+    const wristLeft = reshapedFrame[0]; // Left wrist at index 0
+    const wristRight = reshapedFrame[21]; // Right wrist at index 21
+    const origin = [
+      (wristLeft[0] + wristRight[0]) / 2.0,
+      (wristLeft[1] + wristRight[1]) / 2.0,
+      (wristLeft[2] + wristRight[2]) / 2.0
+    ];
 
-    // Process left hand (indices 0–62, user's left hand)
-    const leftHand = frame.slice(0, LANDMARK_COUNT * COORDS_PER_LANDMARK);
-    let hasLeftHand = leftHand.some(val => val !== 0);
+    // Center all keypoints around the midpoint
+    const centeredFrame = reshapedFrame.map(landmark => [
+      landmark[0] - origin[0],
+      landmark[1] - origin[1],
+      landmark[2] - origin[2]
+    ]);
 
-    if (hasLeftHand) {
-      const wristX = frame[WRIST_INDEX * COORDS_PER_LANDMARK];
-      const wristY = frame[WRIST_INDEX * COORDS_PER_LANDMARK + 1];
-      const wristZ = frame[WRIST_INDEX * COORDS_PER_LANDMARK + 2];
-
-      const centeredLeft = new Array(LANDMARK_COUNT * COORDS_PER_LANDMARK).fill(0);
-      for (let i = 0; i < LANDMARK_COUNT; i++) {
-        const base = i * COORDS_PER_LANDMARK;
-        centeredLeft[base] = frame[base] - wristX;
-        centeredLeft[base + 1] = frame[base + 1] - wristY;
-        centeredLeft[base + 2] = frame[base + 2] - wristZ;
-      }
-
-      const mcpBase = MIDDLE_MCP_INDEX * COORDS_PER_LANDMARK;
-      const handSize = Math.sqrt(
-        centeredLeft[mcpBase] ** 2 +
-        centeredLeft[mcpBase + 1] ** 2 +
-        centeredLeft[mcpBase + 2] ** 2
-      );
-
-      if (handSize > 0) {
-        for (let i = 0; i < LANDMARK_COUNT * COORDS_PER_LANDMARK; i++) {
-          normalizedFrame[i] = centeredLeft[i] / handSize;
-        }
-      }
-    }
-
-    // Process right hand (indices 63–125, user's right hand)
-    const rightHand = frame.slice(LANDMARK_COUNT * COORDS_PER_LANDMARK);
-    let hasRightHand = rightHand.some(val => val !== 0);
-
-    if (hasRightHand) {
-      const wristBase = LANDMARK_COUNT * COORDS_PER_LANDMARK;
-      const wristX = frame[wristBase];
-      const wristY = frame[wristBase + 1];
-      const wristZ = frame[wristBase + 2];
-
-      const centeredRight = new Array(LANDMARK_COUNT * COORDS_PER_LANDMARK).fill(0);
-      for (let i = 0; i < LANDMARK_COUNT; i++) {
-        const base = i * COORDS_PER_LANDMARK + wristBase;
-        const outBase = i * COORDS_PER_LANDMARK;
-        centeredRight[outBase] = frame[base] - wristX;
-        centeredRight[outBase + 1] = frame[base + 1] - wristY;
-        centeredRight[outBase + 2] = frame[base + 2] - wristZ;
-      }
-
-      const mcpBase = MIDDLE_MCP_INDEX * COORDS_PER_LANDMARK;
-      const handSize = Math.sqrt(
-        centeredRight[mcpBase] ** 2 +
-        centeredRight[mcpBase + 1] ** 2 +
-        centeredRight[mcpBase + 2] ** 2
-      );
-
-      if (handSize > 0) {
-        for (let i = 0; i < LANDMARK_COUNT * COORDS_PER_LANDMARK; i++) {
-          normalizedFrame[i + wristBase] = centeredRight[i] / handSize;
-        }
-      }
-    }
-
+    // Flatten back to length-126 vector
+    const normalizedFrame: number[] = centeredFrame.flat();
     normalizedSequence.push(normalizedFrame);
   }
 
@@ -269,8 +230,8 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
         hands.setOptions({
           maxNumHands: 2,
           modelComplexity: 1, //1
-          minDetectionConfidence: 0.5,
-          minTrackingConfidence: 0.5,
+          minDetectionConfidence: 0.8,
+          minTrackingConfidence: 0.8,
         });
         await hands.initialize();
         if (!isMounted) return;
@@ -313,7 +274,9 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
         setModel(loadedModel);
         
         setLabels(['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M',
-          'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z']);
+                    'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z',
+                    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9','10',
+                    'SPACE', 'BACKSPACE','BACKGROUND']);
       } catch (error) {
         console.error('Initialization failed:', error);
         if (isMounted) {
@@ -384,7 +347,7 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
       const labelIndex = labelIndexTensor[0];
       const confidence = probs[labelIndex];
       prediction.dispose();
-      return confidence > 0.85 ? labels[labelIndex] : 'Unknown';
+      return confidence > 0.85 ? labels[labelIndex] : 'BACKGROUND';
     } catch (error) {
       console.error('Prediction error:', error);
       return 'Prediction failed';
@@ -534,7 +497,7 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
           predictionsRef.current.every(p => p === prediction);
 
         // Handle Unknown prediction timing
-        if (isStable && prediction === 'Unknown') {
+        if (isStable && (prediction === 'BACKGROUND' || prediction === 'Unknown')) {
           if (!unknownStartTimeRef.current) {
             unknownStartTimeRef.current = performance.now();
           } else {
@@ -545,9 +508,9 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
               predictionsRef.current = []; // Clear predictions
             }
           }
-          APP.conference._room.sendCommand('sign_language', { value: 'Unknown' });
+          APP.conference._room.sendCommand('sign_language', { value: 'BACKGROUND' });
           updateSubtitles('');
-        } else if (isStable && prediction !== 'Unknown') {
+        } else if (isStable && prediction !== 'BACKGROUND') {
           unknownStartTimeRef.current = null; // Reset timer on valid detection
           APP.conference._room.sendCommand('sign_language', { value: prediction });
           updateSubtitles(prediction);
@@ -737,18 +700,21 @@ const SignLanguageOverlay: React.FC<OverlayProps> = ({ subtitles, error, t, isLi
       setPredictions('');
       return;
     }
-    if (subtitles.trim() && subtitles !== 'Unknown') {
-      setPredictions(prev => {
-        const newPredictions = prev + subtitles; // Append new sign to existing string
-        if (newPredictions.length > 1) {
-          // Perform async operation
-          (async () => {
-            try {
-              const data = await postToGemini(newPredictions);
-              if (
-                data &&
-                data.candidates &&
-                Array.isArray(data.candidates) &&
+    if (subtitles.trim() && subtitles !== 'BACKGROUND') {
+      if (subtitles === 'BACKSPACE') {
+        setPredictions(prev => prev.slice(0, -1)); // Remove last character
+      } else if (subtitles === 'SPACE') {
+        setPredictions(prev => {
+          const newPredictions = prev; // Append new sign to existing string
+          if (subtitles == 'SPACE' && newPredictions.length > 1) {
+            // Perform async operation
+            (async () => {
+              try {
+                const data = await postToGemini(newPredictions);
+                if (
+                  data &&
+                  data.candidates &&
+                  Array.isArray(data.candidates) &&
                 data.candidates[0] &&
                 data.candidates[0].content &&
                 data.candidates[0].content.parts &&
@@ -775,7 +741,15 @@ const SignLanguageOverlay: React.FC<OverlayProps> = ({ subtitles, error, t, isLi
         return newPredictions.slice(-50); // Limit length
       });
     }
-  }, [subtitles, error, t, isSubtitlesCleared]);
+    else {
+      setPredictions(prev => {
+        const newPredictions = prev + subtitles;
+        console.log('Updated predictions:', newPredictions);
+        return newPredictions.slice(-50); // Limit to last 50 chars to prevent overflow
+      });
+    }
+  }
+}, [subtitles, error, t, isSubtitlesCleared]);
 
   // Gemini backend POST function
   const postToGemini = async (text: string) => {
