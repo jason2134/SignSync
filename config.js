@@ -153,7 +153,7 @@ var config = {
     // webrtcIceUdpDisable: false,
 
     // Disables ICE/TCP by filtering out local and remote TCP candidates in
-    // signalling.
+    // signalling.model_inbound_8
     // webrtcIceTcpDisable: false,
 
 

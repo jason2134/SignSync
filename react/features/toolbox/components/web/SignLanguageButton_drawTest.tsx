@@ -1,10 +1,12 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, Component, ErrorInfo } from 'react';
 import { translate } from '../../../base/i18n/functions';
 import { withTranslation, WithTranslation } from 'react-i18next';
 import { connect } from 'react-redux';
 import * as tf from '@tensorflow/tfjs';
 import { Hands, Results as HandResults } from '@mediapipe/hands';
 import { Camera } from '@mediapipe/camera_utils';
+import { drawConnectors, drawLandmarks as mpDrawLandmarks } from '@mediapipe/drawing_utils';
+import { HAND_CONNECTIONS } from '@mediapipe/hands';
 import '@tensorflow/tfjs-backend-webgl';
 import JitsiMeetJS from '../../../base/lib-jitsi-meet';
 import ReducerRegistry from '../../../base/redux/ReducerRegistry';
@@ -15,13 +17,20 @@ interface SignLanguageState {
   error: string | null;
   isListenOnly: boolean;
   isSubtitlesCleared: boolean;
+  isDeviceSupported: boolean;
 }
 
-const initialState: SignLanguageState = { text: '', error: null, isListenOnly: false, isSubtitlesCleared: false };
+const initialState: SignLanguageState = { 
+  text: '', 
+  error: null, 
+  isListenOnly: false, 
+  isSubtitlesCleared: false, 
+  isDeviceSupported: true 
+};
 
 const SIGN_LANGUAGE_FEATURE = 'sign-language';
 
-const signLanguageReducer = (state = initialState, action: { type: string; text?: string; error?: string; isListenOnly?: boolean }) => {
+const signLanguageReducer = (state = initialState, action: { type: string; text?: string; error?: string; isListenOnly?: boolean; isDeviceSupported?: boolean }) => {
   switch (action.type) {
     case 'UPDATE_SIGN_LANGUAGE_SUBTITLES':
       return { ...state, text: action.text || '', error: null, isSubtitlesCleared: false };
@@ -32,6 +41,8 @@ const signLanguageReducer = (state = initialState, action: { type: string; text?
     case 'TOGGLE_LISTEN_ONLY':
       console.log('Redux: Toggling listen-only:', action.isListenOnly);
       return { ...state, isListenOnly: action.isListenOnly ?? !state.isListenOnly, isSubtitlesCleared: false };
+    case 'SET_DEVICE_SUPPORT':
+      return { ...state, isDeviceSupported: action.isDeviceSupported ?? true };
     default:
       return state;
   }
@@ -96,80 +107,36 @@ const extractKeypoints = (results: HandResults | null): KeypointFrame => {
  * Centers each hand by wrist (landmark 0), scales by middle finger MCP (landmark 9).
  * Returns zeros for undetected hands or invalid scaling.
  */
-const normalizeKeypoints = (sequence: KeypointSequence): KeypointSequence => {
-  const normalizedSequence: KeypointSequence = [];
+const normalizeKeypoints = (sequence: number[][]): number[][] => {
+  const expectedLength = 126;
+  if (!Array.isArray(sequence) || sequence.some(frame => frame.length !== expectedLength)) {
+    throw new Error(`Invalid sequence: each frame must have ${expectedLength} elements`);
+  }
+
+  const normalizedSequence: number[][] = [];
 
   for (const frame of sequence) {
-    if (frame.length !== KEYPOINTS_PER_FRAME) {
-      throw new Error(`Invalid frame length: expected ${KEYPOINTS_PER_FRAME}, got ${frame.length}`);
+    const reshapedFrame: number[][] = [];
+    for (let i = 0; i < 42; i++) {
+      const base = i * 3;
+      reshapedFrame.push([frame[base], frame[base + 1], frame[base + 2]]);
     }
 
-    const normalizedFrame = new Array(KEYPOINTS_PER_FRAME).fill(0) as KeypointFrame;
+    const wristLeft = reshapedFrame[0];
+    const wristRight = reshapedFrame[21];
+    const origin = [
+      (wristLeft[0] + wristRight[0]) / 2.0,
+      (wristLeft[1] + wristRight[1]) / 2.0,
+      (wristLeft[2] + wristRight[2]) / 2.0
+    ];
 
-    // Process left hand (indices 0–62, user's left hand)
-    const leftHand = frame.slice(0, LANDMARK_COUNT * COORDS_PER_LANDMARK);
-    let hasLeftHand = leftHand.some(val => val !== 0);
+    const centeredFrame = reshapedFrame.map(landmark => [
+      landmark[0] - origin[0],
+      landmark[1] - origin[1],
+      landmark[2] - origin[2]
+    ]);
 
-    if (hasLeftHand) {
-      const wristX = frame[WRIST_INDEX * COORDS_PER_LANDMARK];
-      const wristY = frame[WRIST_INDEX * COORDS_PER_LANDMARK + 1];
-      const wristZ = frame[WRIST_INDEX * COORDS_PER_LANDMARK + 2];
-
-      const centeredLeft = new Array(LANDMARK_COUNT * COORDS_PER_LANDMARK).fill(0);
-      for (let i = 0; i < LANDMARK_COUNT; i++) {
-        const base = i * COORDS_PER_LANDMARK;
-        centeredLeft[base] = frame[base] - wristX;
-        centeredLeft[base + 1] = frame[base + 1] - wristY;
-        centeredLeft[base + 2] = frame[base + 2] - wristZ;
-      }
-
-      const mcpBase = MIDDLE_MCP_INDEX * COORDS_PER_LANDMARK;
-      const handSize = Math.sqrt(
-        centeredLeft[mcpBase] ** 2 +
-        centeredLeft[mcpBase + 1] ** 2 +
-        centeredLeft[mcpBase + 2] ** 2
-      );
-
-      if (handSize > 0) {
-        for (let i = 0; i < LANDMARK_COUNT * COORDS_PER_LANDMARK; i++) {
-          normalizedFrame[i] = centeredLeft[i] / handSize;
-        }
-      }
-    }
-
-    // Process right hand (indices 63–125, user's right hand)
-    const rightHand = frame.slice(LANDMARK_COUNT * COORDS_PER_LANDMARK);
-    let hasRightHand = rightHand.some(val => val !== 0);
-
-    if (hasRightHand) {
-      const wristBase = LANDMARK_COUNT * COORDS_PER_LANDMARK;
-      const wristX = frame[wristBase];
-      const wristY = frame[wristBase + 1];
-      const wristZ = frame[wristBase + 2];
-
-      const centeredRight = new Array(LANDMARK_COUNT * COORDS_PER_LANDMARK).fill(0);
-      for (let i = 0; i < LANDMARK_COUNT; i++) {
-        const base = i * COORDS_PER_LANDMARK + wristBase;
-        const outBase = i * COORDS_PER_LANDMARK;
-        centeredRight[outBase] = frame[base] - wristX;
-        centeredRight[outBase + 1] = frame[base + 1] - wristY;
-        centeredRight[outBase + 2] = frame[base + 2] - wristZ;
-      }
-
-      const mcpBase = MIDDLE_MCP_INDEX * COORDS_PER_LANDMARK;
-      const handSize = Math.sqrt(
-        centeredRight[mcpBase] ** 2 +
-        centeredRight[mcpBase + 1] ** 2 +
-        centeredRight[mcpBase + 2] ** 2
-      );
-
-      if (handSize > 0) {
-        for (let i = 0; i < LANDMARK_COUNT * COORDS_PER_LANDMARK; i++) {
-          normalizedFrame[i + wristBase] = centeredRight[i] / handSize;
-        }
-      }
-    }
-
+    const normalizedFrame: number[] = centeredFrame.flat();
     normalizedSequence.push(normalizedFrame);
   }
 
@@ -181,12 +148,12 @@ interface ButtonProps extends WithTranslation {
   'aria-label'?: string;
   className?: string;
   isListenOnly: boolean;
+  isDeviceSupported: boolean;
   dispatch: (action: any) => void;
 }
 
-const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel, className, isListenOnly, dispatch }) => {
+const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel, className, isListenOnly, isDeviceSupported, dispatch }) => {
   const [isTranslationEnabled, setIsTranslationEnabled] = useState(false);
-  const [isDeviceSupported, setIsDeviceSupported] = useState(true);
   const animationFrameRef = useRef<(() => void) | null>(null);
   const [model, setModel] = useState<tf.LayersModel | null>(null);
   const [labels, setLabels] = useState<string[]>([]);
@@ -196,18 +163,49 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
   const predictionsRef = useRef<string[]>([]);
   const lastFrameTimeRef = useRef<number>(0);
   const unknownStartTimeRef = useRef<number | null>(null);
+  const videoElementRef = useRef<HTMLVideoElement | null>(null);
+  const canvasElementRef = useRef<HTMLCanvasElement | null>(null);
+  const isCleanedUp = useRef<boolean>(false);
 
   // Check device compatibility
   useEffect(() => {
     const checkDevice = async () => {
-      const webglVersion = await tf.env().get('WEBGL_VERSION');
-      if (!webglVersion) {
-        setIsDeviceSupported(false);
-        dispatch({ type: 'SET_SIGN_LANGUAGE_ERROR', error: 'errors.deviceUnsupported' });
+      try {
+        const webglVersion = await tf.env().get('WEBGL_VERSION');
+        const canvas = document.createElement('canvas');
+        const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+        if (!webglVersion || !gl) {
+          dispatch({ type: 'SET_DEVICE_SUPPORT', isDeviceSupported: false });
+          dispatch({ type: 'SET_SIGN_LANGUAGE_ERROR', error: 'errors.deviceUnsupported' });
+        } else {
+          dispatch({ type: 'SET_DEVICE_SUPPORT', isDeviceSupported: true });
+        }
+      } catch (error) {
+        console.error('Device check failed:', error);
+        dispatch({ type: 'SET_DEVICE_SUPPORT', isDeviceSupported: false });
       }
     };
     checkDevice();
   }, [dispatch]);
+
+  // Helper function to clean up video and canvas elements
+  const cleanupVideoElement = () => {
+    if (videoElementRef.current) {
+      videoElementRef.current.srcObject = null;
+      if (videoElementRef.current.parentNode) {
+        videoElementRef.current.parentNode.removeChild(videoElementRef.current);
+      }
+      videoElementRef.current = null;
+      console.log('Video element cleaned up');
+    }
+    if (canvasElementRef.current) {
+      if (canvasElementRef.current.parentNode) {
+        canvasElementRef.current.parentNode.removeChild(canvasElementRef.current);
+      }
+      canvasElementRef.current = null;
+      console.log('Canvas element cleaned up');
+    }
+  };
 
   // Initialize MediaPipe Hands and TensorFlow model
   useEffect(() => {
@@ -222,8 +220,8 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
         hands.setOptions({
           maxNumHands: 2,
           modelComplexity: 1,
-          minDetectionConfidence: 0.5,
-          minTrackingConfidence: 0.5,
+          minDetectionConfidence: 0.3,
+          minTrackingConfidence: 0.3,
         });
         await hands.initialize();
         if (!isMounted) return;
@@ -266,7 +264,9 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
         setModel(loadedModel);
         
         setLabels(['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M',
-          'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z']);
+                    'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z',
+                    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9','10',
+                    'SPACE', 'BACKSPACE','BACKGROUND']);
       } catch (error) {
         console.error('Initialization failed:', error);
         if (isMounted) {
@@ -279,22 +279,28 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
 
     return () => {
       isMounted = false;
+      isCleanedUp.current = true;
       if (animationFrameRef.current) {
         animationFrameRef.current();
         animationFrameRef.current = null;
+        console.log('Animation frame canceled');
       }
       if (cameraRef.current) {
         cameraRef.current.stop();
         cameraRef.current = null;
+        console.log('Camera stopped');
       }
       if (handsRef.current) {
-        handsRef.current.close();
+        handsRef.current.close().catch(err => console.error('Error closing hands:', err));
         handsRef.current = null;
+        console.log('Hands closed');
       }
       if (model) {
         model.dispose();
         setModel(null);
+        console.log('Model disposed');
       }
+      cleanupVideoElement();
     };
   }, [dispatch]);
 
@@ -330,7 +336,7 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
       const labelIndex = labelIndexTensor[0];
       const confidence = probs[labelIndex];
       prediction.dispose();
-      return confidence > 0.85 ? labels[labelIndex] : 'Unknown';
+      return confidence > 0.85 ? labels[labelIndex] : 'BACKGROUND';
     } catch (error) {
       console.error('Prediction error:', error);
       return 'Prediction failed';
@@ -339,7 +345,7 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
 
   // Update subtitles
   const updateSubtitles = (text: string) => {
-    if (isListenOnly) return; // Prevent local predictions from updating subtitles when listen-only is active
+    if (isListenOnly) return;
     if (APP.store) {
       dispatch({
         type: 'UPDATE_SIGN_LANGUAGE_SUBTITLES',
@@ -385,10 +391,10 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
   const processVideoFrames = (videoTrack: any): (() => void) => {
     let shouldContinue = true;
     let animationFrameId: number | null = null;
-    let popupWindow: Window | null = null;
 
     const processFrame = async (timestamp: number) => {
-      if (!shouldContinue || !videoTrack) {
+      if (!shouldContinue || !videoTrack || isCleanedUp.current) {
+        console.log('Stopping frame processing');
         return;
       }
       if (timestamp - lastFrameTimeRef.current < 66) {
@@ -396,6 +402,7 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
         return;
       }
       lastFrameTimeRef.current = timestamp;
+      console.log('Processing frame at:', timestamp);
 
       try {
         if (sequenceRef.current.length < 30) {
@@ -404,61 +411,134 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
         }
         animationFrameId = requestAnimationFrame(processFrame);
       } catch (error) {
+        console.error('Frame processing error:', error);
         dispatch({ type: 'SET_SIGN_LANGUAGE_ERROR', error: 'errors.frameProcessingFailed' });
       }
     };
 
-    const videoElement = document.createElement('video');
-    videoElement.width = 640;
-    videoElement.height = 480;
-
-    try {
-      const mediaStream = videoTrack.stream || videoTrack.getStream?.();
-      if (!(mediaStream instanceof MediaStream)) {
-        throw new Error('No valid MediaStream available from videoTrack');
-      }
-      videoElement.srcObject = mediaStream;
-    } catch (error) {
-      dispatch({ type: 'SET_SIGN_LANGUAGE_ERROR', error: 'errors.videoStreamFailed' });
+    // Find the local video container in JitsiMeet
+    const videoContainer = document.querySelector('#localVideoWrapper') || document.querySelector('.videocontainer') || document.querySelector('div[id*="local"]');
+    console.log('Video container:', videoContainer);
+    if (!videoContainer) {
+      console.error('Local video container not found');
+      dispatch({ type: 'SET_SIGN_LANGUAGE_ERROR', error: 'errors.videoContainerNotFound' });
       return () => {};
     }
 
-    videoElement.onloadedmetadata = () => {
-      videoElement.width = videoElement.videoWidth || 640;
-      videoElement.height = videoElement.videoHeight || 480;
-      videoElement.play().catch(error => {
-        console.error('Failed to play video element:', error);
-      });
-      const checkVideoReady = setInterval(() => {
-        if (videoElement.readyState >= 2) {
-          clearInterval(checkVideoReady);
-          popupWindow = window.open('', 'SignLanguageDebug', 'width=660,height=500');
-          if (popupWindow) {
-            popupWindow.document.body.style.background = '#000';
-            popupWindow.document.body.style.margin = '0';
-            popupWindow.document.body.appendChild(videoElement);
-            popupWindow.document.title = 'Video Input (Raw)';
-          }
+    // Get or create the video element
+    let videoElement = videoContainer.querySelector('video');
+    if (!videoElement) {
+      videoElement = document.createElement('video');
+      videoElement.muted = true;
+      videoElementRef.current = videoElement;
+      videoContainer.appendChild(videoElement);
+      console.log('Video element created and appended');
+      try {
+        const mediaStream = videoTrack.stream || videoTrack.getStream?.();
+        console.log('Media stream:', mediaStream);
+        if (!(mediaStream instanceof MediaStream)) {
+          throw new Error('No valid MediaStream available from videoTrack');
         }
-      }, 100);
+        videoElement.srcObject = mediaStream;
+        console.log('Video stream attached');
+      } catch (error) {
+        console.error('Error attaching video stream:', error);
+        dispatch({ type: 'SET_SIGN_LANGUAGE_ERROR', error: 'errors.videoStreamFailed' });
+        return () => {};
+      }
+    } else {
+      videoElementRef.current = videoElement;
+      console.log('Existing video element found:', videoElement);
+    }
+
+    // Create canvas for landmarks
+    const canvasElement = document.createElement('canvas');
+    canvasElement.style.position = 'absolute';
+    canvasElement.style.top = '0';
+    canvasElement.style.left = '0';
+    canvasElement.style.zIndex = '1';
+    canvasElement.style.border = '2px solid red'; // Temporary for debugging
+    canvasElementRef.current = canvasElement;
+    videoContainer.style.position = 'relative';
+    videoContainer.appendChild(canvasElement);
+    console.log('Canvas appended to:', videoContainer);
+
+    // Resize canvas to match video
+    const resizeCanvas = () => {
+      if (videoElement && canvasElement) {
+        canvasElement.width = videoElement.videoWidth || videoElement.offsetWidth || 640;
+        canvasElement.height = videoElement.videoHeight || videoElement.offsetHeight || 480;
+        canvasElement.style.width = `${videoElement.offsetWidth}px`;
+        canvasElement.style.height = `${videoElement.offsetHeight}px`;
+        console.log('Canvas resized:', { width: canvasElement.width, height: canvasElement.height, styleWidth: canvasElement.style.width, styleHeight: canvasElement.style.height });
+      }
     };
 
+    // Observe video size changes
+    const resizeObserver = new ResizeObserver(() => {
+      resizeCanvas();
+    });
+    if (videoElement) {
+      resizeObserver.observe(videoElement);
+      videoElement.onloadedmetadata = () => {
+        console.log('Video metadata loaded:', { videoWidth: videoElement.videoWidth, videoHeight: videoElement.videoHeight });
+        resizeCanvas();
+        videoElement.play().catch(error => {
+          console.error('Video play error:', error);
+          dispatch({ type: 'SET_SIGN_LANGUAGE_ERROR', error: 'errors.videoPlaybackFailed' });
+        });
+      };
+    }
+
+    // Initialize camera
     const camera = new Camera(videoElement, {
       onFrame: async () => {
         if (handsRef.current && videoElement.readyState >= 2 && videoElement.videoWidth > 0 && videoElement.videoHeight > 0) {
-          await handsRef.current.send({ image: videoElement });
+          console.log('Sending camera frame:', { readyState: videoElement.readyState, width: videoElement.videoWidth, height: videoElement.videoHeight });
+          await handsRef.current.send({ image: videoElement }).catch(err => console.error('Error sending frame:', err));
+        } else {
+          console.warn('Video element not ready:', {
+            readyState: videoElement.readyState,
+            width: videoElement.videoWidth,
+            height: videoElement.videoHeight,
+          });
         }
       },
       width: 640,
       height: 480,
     });
     camera.start().catch(error => {
+      console.error('Camera start error:', error);
       dispatch({ type: 'SET_SIGN_LANGUAGE_ERROR', error: 'errors.cameraStartFailed' });
     });
     cameraRef.current = camera;
 
     handsRef.current?.onResults(async (results: HandResults) => {
       try {
+        console.log('MediaPipe results:', {
+          landmarks: results.multiHandLandmarks,
+          handedness: results.multiHandedness
+        });
+        const ctx = canvasElementRef.current?.getContext('2d');
+        if (ctx && canvasElementRef.current && videoElementRef.current) {
+          ctx.clearRect(0, 0, canvasElementRef.current.width, canvasElementRef.current.height);
+          ctx.drawImage(videoElementRef.current, 0, 0, canvasElementRef.current.width, canvasElementRef.current.height);
+          if (results.multiHandLandmarks && results.multiHandedness) {
+            console.log('Drawing landmarks for:', results.multiHandLandmarks.length, 'hands');
+            for (let idx = 0; idx < results.multiHandLandmarks.length; idx++) {
+              const landmarks = results.multiHandLandmarks[idx];
+              const handedness = results.multiHandedness[idx].label;
+              const color = handedness === 'Right' ? '#00FF00' : '#FF0000';
+              drawConnectors(ctx, landmarks, HAND_CONNECTIONS, { color, lineWidth: 2 });
+              mpDrawLandmarks(ctx, landmarks, { color, fillColor: color, radius: 4 });
+            }
+          } else {
+            console.log('No landmarks to draw');
+          }
+        } else {
+          console.error('Missing canvas context or elements:', { ctx, canvas: canvasElementRef.current, video: videoElementRef.current });
+        }
+
         const tensor = await preprocessFrame(results);
         const prediction = await predictSign(tensor);
         predictionsRef.current.push(prediction);
@@ -466,22 +546,21 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
         const isStable = predictionsRef.current.length === 10 &&
           predictionsRef.current.every(p => p === prediction);
 
-        // Handle Unknown prediction timing
-        if (isStable && prediction === 'Unknown') {
+        if (isStable && (prediction === 'BACKGROUND' || prediction === 'Unknown')) {
           if (!unknownStartTimeRef.current) {
             unknownStartTimeRef.current = performance.now();
           } else {
             const elapsedTime = performance.now() - unknownStartTimeRef.current;
-            if (elapsedTime >= 8000) { // 8 seconds
+            if (elapsedTime >= 8000) {
               dispatch({ type: 'CLEAR_SIGN_LANGUAGE_SUBTITLES' });
-              unknownStartTimeRef.current = null; // Reset timer
-              predictionsRef.current = []; // Clear predictions
+              unknownStartTimeRef.current = null;
+              predictionsRef.current = [];
             }
           }
-          APP.conference._room.sendCommand('sign_language', { value: 'Unknown' });
+          APP.conference._room.sendCommand('sign_language', { value: 'BACKGROUND' });
           updateSubtitles('');
-        } else if (isStable && prediction !== 'Unknown') {
-          unknownStartTimeRef.current = null; // Reset timer on valid detection
+        } else if (isStable && prediction !== 'BACKGROUND') {
+          unknownStartTimeRef.current = null;
           APP.conference._room.sendCommand('sign_language', { value: prediction });
           updateSubtitles(prediction);
         }
@@ -495,16 +574,18 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
     requestAnimationFrame(processFrame);
     return () => {
       shouldContinue = false;
-      if (animationFrameId) cancelAnimationFrame(animationFrameId);
+      isCleanedUp.current = true;
+      if (animationFrameId) {
+        cancelAnimationFrame(animationFrameId);
+        console.log('Animation frame canceled in processVideoFrames');
+      }
       if (cameraRef.current) {
         cameraRef.current.stop();
         cameraRef.current = null;
+        console.log('Camera stopped in processVideoFrames');
       }
-      videoElement.srcObject = null;
-      if (popupWindow) {
-        popupWindow.close();
-        popupWindow = null;
-      }
+      resizeObserver.disconnect();
+      cleanupVideoElement();
       sequenceRef.current = [];
       predictionsRef.current = [];
       unknownStartTimeRef.current = null;
@@ -528,15 +609,19 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
       dispatch({ type: 'SET_SIGN_LANGUAGE_ERROR', error: 'errors.deviceUnsupported' });
       return;
     }
+    if (isListenOnly && !isTranslationEnabled) {
+      alert(t('signLanguage.disableListenOnlyFirst'));
+      return;
+    }
     setIsTranslationEnabled(prev => {
       const newValue = !prev;
       if (newValue) {
-        // Turn off Listen Only mode when enabling Sign Language
-        dispatch({ type: 'TOGGLE_LISTEN_ONLY', isListenOnly: false });
         waitForConference().then(() => {
           const currentState = APP.store.getState();
           const isListenOnly = currentState['features/sign-language']?.isListenOnly || false;
           if (isListenOnly) {
+            alert(t('signLanguage.disableListenOnlyFirst'));
+            setIsTranslationEnabled(false);
             return;
           }
           const attemptGetStream = async (attempts = 3, delay = 500): Promise<void> => {
@@ -546,24 +631,27 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
                 const frame = await extractFrame(videoTrack);
                 animationFrameRef.current = processVideoFrames(videoTrack);
               } catch (error) {
+                console.error('Error processing video track:', error);
                 dispatch({ type: 'SET_SIGN_LANGUAGE_ERROR', error: 'errors.initializationFailed' });
               }
             } else if (attempts > 0) {
               await new Promise(resolve => setTimeout(resolve, delay));
               return attemptGetStream(attempts - 1, delay);
             } else {
+              console.error('Failed to get video stream after retries');
               dispatch({ type: 'SET_SIGN_LANGUAGE_ERROR', error: 'errors.initializationFailed' });
             }
           };
           attemptGetStream();
         });
       } else {
-        // Clear subtitles when disabling Sign Language
         dispatch({ type: 'CLEAR_SIGN_LANGUAGE_SUBTITLES' });
         if (animationFrameRef.current) {
           animationFrameRef.current();
           animationFrameRef.current = null;
+          console.log('Animation frame canceled in handleClick');
         }
+        cleanupVideoElement();
       }
       return newValue;
     });
@@ -585,6 +673,7 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
 const ConnectedSignLanguageButton = translate(connect(
   (state: any) => ({
     isListenOnly: state['features/sign-language']?.isListenOnly || false,
+    isDeviceSupported: state['features/sign-language']?.isDeviceSupported || true,
   }),
   (dispatch) => ({ dispatch })
 )(SignLanguageButton));
@@ -595,18 +684,21 @@ interface ListenOnlyButtonProps extends WithTranslation {
   className?: string;
   isListenOnly: boolean;
   isTranslationEnabled: boolean;
+  isDeviceSupported: boolean;
   dispatch: (action: any) => void;
 }
 
-const ListenOnlySignLanguageButton: React.FC<ListenOnlyButtonProps> = ({ t, 'aria-label': ariaLabel, className, isListenOnly, isTranslationEnabled, dispatch }) => {
+const ListenOnlySignLanguageButton: React.FC<ListenOnlyButtonProps> = ({ t, 'aria-label': ariaLabel, className, isListenOnly, isTranslationEnabled, isDeviceSupported, dispatch }) => {
   const handleClick = () => {
+    if (isTranslationEnabled && !isListenOnly) {
+      alert(t('Disable the Sign Language Button to turn on Listen Only Mode'));
+      return;
+    }
     const newListenOnlyState = !isListenOnly;
     dispatch({ type: 'TOGGLE_LISTEN_ONLY', isListenOnly: newListenOnlyState });
     if (newListenOnlyState) {
-      // Disable Sign Language translation when enabling Listen Only
       dispatch({ type: 'CLEAR_SIGN_LANGUAGE_SUBTITLES' });
     } else {
-      // Clear subtitles when disabling Listen Only
       dispatch({ type: 'CLEAR_SIGN_LANGUAGE_SUBTITLES' });
     }
   };
@@ -617,7 +709,7 @@ const ListenOnlySignLanguageButton: React.FC<ListenOnlyButtonProps> = ({ t, 'ari
       aria-label={ariaLabel || t('toolbar.listenOnlySignLanguage')}
       onClick={handleClick}
       style={{ color: isListenOnly ? '#00ff00' : '#ffffff' }}
-      disabled={isTranslationEnabled} // Disable when Sign Language is enabled
+      disabled={!isDeviceSupported}
     >
       {t('toolbar.listenOnlySignLanguage')}
     </button>
@@ -627,7 +719,8 @@ const ListenOnlySignLanguageButton: React.FC<ListenOnlyButtonProps> = ({ t, 'ari
 const ConnectedListenOnlySignLanguageButton = translate(connect(
   (state: any) => ({
     isListenOnly: state['features/sign-language']?.isListenOnly || false,
-    isTranslationEnabled: !!state['features/sign-language']?.text, // Approximation based on subtitles presence
+    isTranslationEnabled: !!state['features/sign-language']?.text,
+    isDeviceSupported: state['features/sign-language']?.isDeviceSupported || true,
   }),
   (dispatch) => ({ dispatch })
 )(ListenOnlySignLanguageButton));
@@ -641,24 +734,85 @@ interface OverlayProps extends WithTranslation {
 }
 
 const SignLanguageOverlay: React.FC<OverlayProps> = ({ subtitles, error, t, isListenOnly, isSubtitlesCleared }) => {
-  const [predictions, setPredictions] = useState<string[]>([]);
+  const [predictions, setPredictions] = useState<string>('');
 
   useEffect(() => {
     if (error) {
-      setPredictions([t(error)]);
+      setPredictions(t(error));
       return;
     }
     if (isSubtitlesCleared) {
-      setPredictions([]);
+      setPredictions('');
       return;
     }
-    if (subtitles.trim()) {
-      setPredictions(prev => {
-        const newPredictions = [...prev, subtitles];
-        return newPredictions.slice(-10); // Limit predictions to prevent excessive growth
-      });
+    if (subtitles.trim() && subtitles !== 'BACKGROUND') {
+      if (subtitles === 'BACKSPACE') {
+        setPredictions(prev => prev.slice(0, -1));
+      } else if (subtitles === 'SPACE') {
+        setPredictions(prev => {
+          const newPredictions = prev;
+          if (subtitles == 'SPACE' && newPredictions.length > 1) {
+            (async () => {
+              try {
+                const data = await postToGemini(newPredictions);
+                if (
+                  data &&
+                  data.candidates &&
+                  Array.isArray(data.candidates) &&
+                  data.candidates[0] &&
+                  data.candidates[0].content &&
+                  data.candidates[0].content.parts &&
+                  Array.isArray(data.candidates[0].content.parts) &&
+                  data.candidates[0].content.parts[0] &&
+                  typeof data.candidates[0].content.parts[0].text === 'string'
+                ) {
+                  const resString = data.candidates[0].content.parts[0].text.trim();
+                  console.log('Gemini Response:', resString);
+                  const upperResString = resString.toUpperCase();
+                  setPredictions(upperResString.slice(-50));
+                } else {
+                  console.error('Invalid response structure from postToGemini:', data);
+                  setPredictions(newPredictions.slice(-50));
+                }
+              } catch (err) {
+                console.error('Failed to fetch from Gemini:', err);
+                setPredictions(newPredictions.slice(-50));
+              }
+            })();
+            return newPredictions.slice(-50);
+          }
+          return newPredictions.slice(-50);
+        });
+      } else {
+        setPredictions(prev => {
+          const newPredictions = prev + subtitles;
+          console.log('Updated predictions:', newPredictions);
+          return newPredictions.slice(-50);
+        });
+      }
     }
   }, [subtitles, error, t, isSubtitlesCleared]);
+
+  // Gemini backend POST function
+  const postToGemini = async (text: string) => {
+    const prompt = text.replace(/\s/g, '');
+    console.log('Request prompt:', prompt);
+    try {
+      const response = await fetch('/ask', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ prompt: prompt }),
+      });
+      const data = await response.json();
+      console.log('Gemini Response:', data);
+      return data;
+    } catch (err) {
+      console.error('Failed to post to Gemini:', err);
+      return null;
+    }
+  };
 
   useEffect(() => {
     if (!APP.store) return;
@@ -667,11 +821,11 @@ const SignLanguageOverlay: React.FC<OverlayProps> = ({ subtitles, error, t, isLi
   }, []);
 
   const handleClear = () => {
-    setPredictions([]);
+    setPredictions('');
     APP.store.dispatch({ type: 'CLEAR_SIGN_LANGUAGE_SUBTITLES' });
   };
 
-  if (!predictions.length) return null;
+  if (!predictions) return null;
 
   return (
     <div className="sign-language-overlay" aria-live="polite">
@@ -718,12 +872,10 @@ const SignLanguageOverlay: React.FC<OverlayProps> = ({ subtitles, error, t, isLi
           }
         `}
       </style>
-      <span className="prediction-text">
-        {predictions.join('')}
-      </span>
+      <span className="prediction-text">{predictions}</span>
       {predictions.length > 0 && (
         <button className="clear-button" onClick={handleClear}>
-          {t('signLanguage.clear')}
+          {t('Translation Clear')}
         </button>
       )}
     </div>
@@ -739,6 +891,46 @@ const ConnectedSignLanguageOverlay = withTranslation()(connect(
   })
 )(SignLanguageOverlay));
 
+// Error Boundary Component
+interface ErrorBoundaryProps {
+  children: React.ReactNode;
+}
+
+interface ErrorBoundaryState {
+  hasError: boolean;
+  error: Error | null;
+}
+
+class SignLanguageErrorBoundary extends Component<ErrorBoundaryProps & WithTranslation, ErrorBoundaryState> {
+  state: ErrorBoundaryState = {
+    hasError: false,
+    error: null,
+  };
+
+  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+    console.error('SignLanguageErrorBoundary caught error:', error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ color: 'red', padding: '1rem' }}>
+          <h2>{this.props.t('signLanguage.error')}</h2>
+          <p>{this.state.error?.message || this.props.t('signLanguage.unexpectedError')}</p>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
+const TranslatedSignLanguageErrorBoundary = withTranslation()(SignLanguageErrorBoundary);
+
 const SignLanguageApp: React.FC = () => {
   useEffect(() => {
     if (!APP.store) return;
@@ -747,16 +939,20 @@ const SignLanguageApp: React.FC = () => {
     }
   }, []);
   return (
-    <>
+    <TranslatedSignLanguageErrorBoundary>
       <ConnectedSignLanguageButton />
       <ConnectedListenOnlySignLanguageButton />
       <ConnectedSignLanguageOverlay />
-    </>
+    </TranslatedSignLanguageErrorBoundary>
   );
 };
 
 const SignLanguageOverlayApp: React.FC = () => {
-  return <ConnectedSignLanguageOverlay />;
+  return (
+    <TranslatedSignLanguageErrorBoundary>
+      <ConnectedSignLanguageOverlay />
+    </TranslatedSignLanguageErrorBoundary>
+  );
 };
 
 export { SignLanguageApp, SignLanguageOverlayApp, ConnectedSignLanguageButton, ConnectedListenOnlySignLanguageButton };

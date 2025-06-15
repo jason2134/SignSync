@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, Component, ErrorInfo } from 'react';
+import React, { useState, useEffect, useRef, Component, ErrorInfo, PropsWithChildren } from 'react';
 import { translate } from '../../../base/i18n/functions';
 import { withTranslation, WithTranslation } from 'react-i18next';
 import { connect } from 'react-redux';
@@ -12,6 +12,7 @@ import ReducerRegistry from '../../../base/redux/ReducerRegistry';
 // Redux reducer for sign language subtitles
 interface SignLanguageState {
   text: string;
+  confidence: number | null;
   error: string | null;
   isListenOnly: boolean;
   isSubtitlesCleared: boolean;
@@ -20,6 +21,7 @@ interface SignLanguageState {
 
 const initialState: SignLanguageState = { 
   text: '', 
+  confidence: null,
   error: null, 
   isListenOnly: false, 
   isSubtitlesCleared: false, 
@@ -28,14 +30,14 @@ const initialState: SignLanguageState = {
 
 const SIGN_LANGUAGE_FEATURE = 'sign-language';
 
-const signLanguageReducer = (state = initialState, action: { type: string; text?: string; error?: string; isListenOnly?: boolean; isDeviceSupported?: boolean }) => {
+const signLanguageReducer = (state = initialState, action: { type: string; text?: string; confidence?: number; error?: string; isListenOnly?: boolean; isDeviceSupported?: boolean }) => {
   switch (action.type) {
     case 'UPDATE_SIGN_LANGUAGE_SUBTITLES':
-      return { ...state, text: action.text || '', error: null, isSubtitlesCleared: false };
+      return { ...state, text: action.text || '', confidence: action.confidence || null, error: null, isSubtitlesCleared: false };
     case 'CLEAR_SIGN_LANGUAGE_SUBTITLES':
-      return { ...state, text: '', error: null, isSubtitlesCleared: true };
+      return { ...state, text: '', confidence: null, error: null, isSubtitlesCleared: true };
     case 'SET_SIGN_LANGUAGE_ERROR':
-      return { ...state, error: action.error || null, isSubtitlesCleared: false };
+      return { ...state, error: action.error || null, confidence: null, isSubtitlesCleared: false };
     case 'TOGGLE_LISTEN_ONLY':
       console.log('Redux: Toggling listen-only:', action.isListenOnly);
       return { ...state, isListenOnly: action.isListenOnly ?? !state.isListenOnly, isSubtitlesCleared: false };
@@ -55,13 +57,10 @@ type KeypointSequence = KeypointFrame[];
 const LANDMARK_COUNT = 21;
 const COORDS_PER_LANDMARK = 3;
 const KEYPOINTS_PER_FRAME = LANDMARK_COUNT * COORDS_PER_LANDMARK * 2; // 126
-const WRIST_INDEX = 0;
-const MIDDLE_MCP_INDEX = 9;
 
 /**
  * Extracts keypoints from MediaPipe Hands results.
- * Returns a 126-element array: 63 for left hand (21 landmarks × 3 coords), 63 for right hand.
- * Flips x-coordinates to match mirrored training data (user's left hand on left side).
+ * Returns a 126-element array: 63 for left hand, 63 for right hand.
  */
 const extractKeypoints = (results: HandResults | null): KeypointFrame => {
   const leftHand = new Array(LANDMARK_COUNT * COORDS_PER_LANDMARK).fill(0);
@@ -77,7 +76,7 @@ const extractKeypoints = (results: HandResults | null): KeypointFrame => {
     const handednessData = results.multiHandedness[idx];
 
     const keypoints = landmarks
-      .map((landmark: any) => [1 - landmark.x, landmark.y, landmark.z])
+      .map((landmark: any) => [landmark.x, landmark.y, landmark.z])
       .flat();
 
     if (keypoints.length !== LANDMARK_COUNT * COORDS_PER_LANDMARK) {
@@ -102,12 +101,10 @@ const extractKeypoints = (results: HandResults | null): KeypointFrame => {
 
 /**
  * Normalizes a sequence of keypoint frames.
- * Centers each hand by wrist (landmark 0), scales by middle finger MCP (landmark 9).
- * Returns zeros for undetected hands or invalid scaling.
+ * Centers keypoints around wrist midpoint.
  */
 const normalizeKeypoints = (sequence: number[][]): number[][] => {
-  // Validate input
-  const expectedLength = 126; // 42 landmarks * 3 coords (x, y, z)
+  const expectedLength = 126;
   if (!Array.isArray(sequence) || sequence.some(frame => frame.length !== expectedLength)) {
     throw new Error(`Invalid sequence: each frame must have ${expectedLength} elements`);
   }
@@ -115,30 +112,26 @@ const normalizeKeypoints = (sequence: number[][]): number[][] => {
   const normalizedSequence: number[][] = [];
 
   for (const frame of sequence) {
-    // Reshape frame to (42 landmarks, 3 coords)
     const reshapedFrame: number[][] = [];
     for (let i = 0; i < 42; i++) {
       const base = i * 3;
       reshapedFrame.push([frame[base], frame[base + 1], frame[base + 2]]);
     }
 
-    // Compute wrist midpoint
-    const wristLeft = reshapedFrame[0]; // Left wrist at index 0
-    const wristRight = reshapedFrame[21]; // Right wrist at index 21
+    const wristLeft = reshapedFrame[0];
+    const wristRight = reshapedFrame[21];
     const origin = [
       (wristLeft[0] + wristRight[0]) / 2.0,
       (wristLeft[1] + wristRight[1]) / 2.0,
       (wristLeft[2] + wristRight[2]) / 2.0
     ];
 
-    // Center all keypoints around the midpoint
     const centeredFrame = reshapedFrame.map(landmark => [
       landmark[0] - origin[0],
       landmark[1] - origin[1],
       landmark[2] - origin[2]
     ]);
 
-    // Flatten back to length-126 vector
     const normalizedFrame: number[] = centeredFrame.flat();
     normalizedSequence.push(normalizedFrame);
   }
@@ -155,7 +148,7 @@ interface ButtonProps extends WithTranslation {
   dispatch: (action: any) => void;
 }
 
-const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel, className, isListenOnly, isDeviceSupported, dispatch }) => {
+const SignLanguageButton: React.FC<PropsWithChildren<ButtonProps>> = ({ t, 'aria-label': ariaLabel, className, isListenOnly, isDeviceSupported, dispatch }) => {
   const [isTranslationEnabled, setIsTranslationEnabled] = useState(false);
   const animationFrameRef = useRef<(() => void) | null>(null);
   const [model, setModel] = useState<tf.LayersModel | null>(null);
@@ -163,13 +156,16 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
   const handsRef = useRef<Hands | null>(null);
   const cameraRef = useRef<Camera | null>(null);
   const sequenceRef = useRef<number[][]>([]);
-  const predictionsRef = useRef<{ label: string; confidence: number }[]>([]);
+  const predictionsRef = useRef<string[]>([]);
   const lastFrameTimeRef = useRef<number>(0);
   const unknownStartTimeRef = useRef<number | null>(null);
   const videoElementRef = useRef<HTMLVideoElement | null>(null);
   const canvasElementRef = useRef<HTMLCanvasElement | null>(null);
   const popupWindowRef = useRef<Window | null>(null);
   const isCleanedUp = useRef<boolean>(false);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const lastStablePredictionRef = useRef<string | null>(null);
+  const predictionStateRef = useRef<'LAST_SIGN' | 'BACKGROUND'>('BACKGROUND');
 
   // Check device compatibility
   useEffect(() => {
@@ -192,7 +188,7 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
     checkDevice();
   }, [dispatch]);
 
-  // Helper function to clean up video element
+  // Helper function to clean up video element, canvas, and media stream
   const cleanupVideoElement = () => {
     if (videoElementRef.current) {
       videoElementRef.current.srcObject = null;
@@ -209,6 +205,11 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
       }
       canvasElementRef.current = null;
       console.log('Canvas element cleaned up');
+    }
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach(track => track.stop());
+      mediaStreamRef.current = null;
+      console.log('Media stream stopped');
     }
   };
 
@@ -231,7 +232,6 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
 
     const initialize = async () => {
       try {
-        // Initialize MediaPipe Hands
         const hands = new Hands({
           locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${file}`,
         });
@@ -244,33 +244,32 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
         await hands.initialize();
         if (!isMounted) return;
         handsRef.current = hands;
+        console.log('MediaPipe Hands initialized');
 
-        // Set TensorFlow backend
         await tf.setBackend('webgl');
+        console.log('TensorFlow.js backend set to webgl');
 
-        // Load model
         const modelPath = `static/sign_language_model_tfjs_conv/model.json`;
         const loadedModel = await tf.loadLayersModel(modelPath);
+        console.log('Model loaded');
 
-        // Warm up model
         tf.tidy(() => {
           const dummyInput = tf.zeros([1, 30, 126]);
           loadedModel.predict(dummyInput).dispose();
           dummyInput.dispose();
         });
+        console.log('Model warmed up');
 
-        // Init listener for sign language
         APP.conference._room.addCommandListener('sign_language', (data, participantId) => {
           const detectedSign = data.value;
           console.log(`Received sign from ${participantId}: ${detectedSign}`);
           const currentState = APP.store.getState();
           const isListenOnly = currentState['features/sign-language']?.isListenOnly || false;
-          console.log("ListenOnly State", isListenOnly);
           if (isListenOnly) {
-            console.log("Dispatching sign");
             dispatch({
               type: 'UPDATE_SIGN_LANGUAGE_SUBTITLES',
               text: detectedSign,
+              confidence: null,
             });
           }
         });
@@ -283,8 +282,8 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
         
         setLabels(['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M',
                     'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z',
-                    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9','10',
-                    'SPACE', 'BACKSPACE','BACKGROUND']);
+                    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10',
+                    'SPACE', 'BACKSPACE', 'BACKGROUND']);
       } catch (error) {
         console.error('Initialization failed:', error);
         if (isMounted) {
@@ -323,27 +322,16 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
     };
   }, [dispatch]);
 
-  // Validate sequence to ensure it contains meaningful data
-  const isValidSequence = (sequence: number[][]): boolean => {
-    // Check if at least one frame has non-zero keypoints for at least one hand
-    const hasValidFrame = sequence.some(frame => {
-      const leftHand = frame.slice(0, 63);
-      const rightHand = frame.slice(63, 126);
-      const leftNonZero = leftHand.some(val => Math.abs(val) > 0.001);
-      const rightNonZero = rightHand.some(val => Math.abs(val) > 0.001);
-      return leftNonZero || rightNonZero;
-    });
-    return hasValidFrame;
-  };
-
   // Preprocess frame
-  const preprocessFrame = async (results: HandResults): Promise<tf.Tensor | null> => {
-    if (!handsRef.current || !results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
-      return null; // Skip prediction if no hands detected
+  const preprocessFrame = async (results: HandResults): Promise<tf.Tensor> => {
+    if (!handsRef.current) {
+      console.warn('Hands not initialized');
+      return tf.zeros([1, 30, 126]);
     }
 
-    const tensor = tf.tidy(() => {
+    return tf.tidy(() => {
       const keypoints = extractKeypoints(results);
+      console.log('Keypoints shape:', keypoints.length);
       sequenceRef.current.push(keypoints);
       if (sequenceRef.current.length > 30) {
         sequenceRef.current.shift();
@@ -351,26 +339,15 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
       const paddedSequence = sequenceRef.current.length < 30
         ? [...new Array(30 - sequenceRef.current.length).fill(new Array(126).fill(0)), ...sequenceRef.current]
         : sequenceRef.current;
-      if (!isValidSequence(paddedSequence)) {
-        return tf.zeros([1, 30, 126]); // Return a zero tensor as a valid TensorContainer
-      }
       const normalizedSequence = normalizeKeypoints(paddedSequence as KeypointSequence);
       return tf.tensor3d([normalizedSequence], [1, 30, 126]);
     });
-
-    // Check if the result is a zero tensor (indicating invalid sequence)
-    const isZeroTensor = tf.equal(tensor, tf.zeros([1, 30, 126])).all().dataSync()[0];
-    if (isZeroTensor) {
-      tensor.dispose();
-      return null;
-    }
-
-    return tensor;
   };
 
-  // Predict sign with majority voting
+  // Predict sign
   const predictSign = async (tensor: tf.Tensor): Promise<{ label: string; confidence: number }> => {
     if (!model || !labels.length) {
+      console.warn('Model or labels not loaded');
       return { label: 'Model or labels not loaded', confidence: 0 };
     }
     try {
@@ -381,8 +358,8 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
       ]);
       const labelIndex = labelIndexTensor[0];
       const confidence = probs[labelIndex];
-      console.log(`Prediction: ${labels[labelIndex]}, Prediction confidence: ${confidence}`);
       prediction.dispose();
+      console.log(`Prediction: ${labels[labelIndex]}, Confidence: ${confidence}`);
       return { label: confidence > 0.95 ? labels[labelIndex] : 'BACKGROUND', confidence };
     } catch (error) {
       console.error('Prediction error:', error);
@@ -390,108 +367,46 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
     }
   };
 
-  // Update subtitles
-  const updateSubtitles = (text: string) => {
-    if (isListenOnly) return; // Prevent local predictions from updating subtitles when listen-only is active
+  // Update subtitles with state machine logic
+  const updateSubtitles = (text: string, confidence: number) => {
+    if (isListenOnly) return;
     if (APP.store) {
-      dispatch({
-        type: 'UPDATE_SIGN_LANGUAGE_SUBTITLES',
-        text,
-      });
-    }
-  };
-
-  // Get local video stream
-  const getLocalVideoStream = (): any | null => {
-    const conference = APP.conference._room;
-    if (!conference) return null;
-    const localTracks = conference.getLocalTracks();
-    const videoTrack = localTracks.find(track => track.getType() === 'video');
-    return videoTrack || null;
-  };
-
-  // Extract a single frame
-  const extractFrame = async (videoTrack: any): Promise<ImageData> => {
-    if (!videoTrack || !videoTrack.isVideoTrack() || videoTrack.videoType !== 'camera') {
-      throw new Error('Invalid video track');
-    }
-    const track = videoTrack.getTrack();
-    if (!track || track.readyState !== 'live') {
-      throw new Error('No valid MediaStreamTrack');
-    }
-    const imageCapture = new ImageCapture(track);
-    try {
-      const bitmap = await imageCapture.grabFrame();
-      const canvas = document.createElement('canvas');
-      canvas.width = 640;
-      canvas.height = 480;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) throw new Error('No canvas context');
-      ctx.drawImage(bitmap, 0, 0, 640, 480);
-      return ctx.getImageData(0, 0, 640, 480);
-    } catch (error) {
-      throw error;
-    }
-  };
-
-  // Draw landmarks on canvas
-  const drawLandmarks = (ctx: CanvasRenderingContext2D, results: HandResults) => {
-    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-    ctx.globalCompositeOperation = 'source-over';
-
-    if (results.multiHandLandmarks && results.multiHandedness) {
-      for (let idx = 0; idx < results.multiHandLandmarks.length; idx++) {
-        const landmarks = results.multiHandLandmarks[idx];
-        const handedness = results.multiHandedness[idx].label;
-
-        // Define colors based on hand
-        const color = handedness === 'Right' ? '#00FF00' : '#FF0000'; // Green for right, red for left
-
-        // Draw connections
-        const connections = [
-          [0, 1], [1, 2], [2, 3], [3, 4], // Thumb
-          [0, 5], [5, 6], [6, 7], [7, 8], // Index
-          [0, 9], [9, 10], [10, 11], [11, 12], // Middle
-          [0, 13], [13, 14], [14, 15], [15, 16], // Ring
-          [0, 17], [17, 18], [18, 19], [19, 20], // Pinky
-          [5, 9], [9, 13], [13, 17], // Palm
-        ];
-
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 2;
-        for (const [start, end] of connections) {
-          const startLandmark = landmarks[start];
-          const endLandmark = landmarks[end];
-          ctx.beginPath();
-          ctx.moveTo((1 - startLandmark.x) * ctx.canvas.width, startLandmark.y * ctx.canvas.height);
-          ctx.lineTo((1 - endLandmark.x) * ctx.canvas.width, endLandmark.y * ctx.canvas.height);
-          ctx.stroke();
+      console.log(`Prediction: ${text}, Confidence: ${confidence}`);
+      const isSign = labels.includes(text) && text !== 'BACKGROUND' && text !== 'SPACE' && text !== 'BACKSPACE';
+      if (isSign && (!lastStablePredictionRef.current || lastStablePredictionRef.current === 'BACKGROUND' || text !== lastStablePredictionRef.current)) {
+        dispatch({
+          type: 'UPDATE_SIGN_LANGUAGE_SUBTITLES',
+          text,
+          confidence,
+        });
+        lastStablePredictionRef.current = text;
+        predictionStateRef.current = 'LAST_SIGN';
+        console.log(`Subtitles updated: ${text}`);
+      } else if (text === 'BACKGROUND') {
+        if (predictionStateRef.current === 'LAST_SIGN') {
+          lastStablePredictionRef.current = 'BACKGROUND';
+          predictionStateRef.current = 'BACKGROUND';
+          console.log('Transition to BACKGROUND');
         }
-
-        // Draw landmarks
-        ctx.fillStyle = color;
-        for (const landmark of landmarks) {
-          ctx.beginPath();
-          ctx.arc(
-            (1 - landmark.x) * ctx.canvas.width,
-            landmark.y * ctx.canvas.height,
-            5,
-            0,
-            2 * Math.PI
-          );
-          ctx.fill();
-        }
+      } else if (text === 'SPACE' || text === 'BACKSPACE') {
+        dispatch({
+          type: 'UPDATE_SIGN_LANGUAGE_SUBTITLES',
+          text,
+          confidence,
+        });
+        lastStablePredictionRef.current = text;
+        console.log(`Special character: ${text}`);
       }
     }
   };
 
   // Process video frames
-  const processVideoFrames = (videoTrack: any): (() => void) => {
+  const processVideoFrames = (): (() => void) => {
     let shouldContinue = true;
     let animationFrameId: number | null = null;
 
     const processFrame = async (timestamp: number) => {
-      if (!shouldContinue || !videoTrack || isCleanedUp.current) {
+      if (!shouldContinue || isCleanedUp.current) {
         console.log('Stopping frame processing');
         return;
       }
@@ -502,10 +417,6 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
       lastFrameTimeRef.current = timestamp;
 
       try {
-        if (sequenceRef.current.length < 30) {
-          animationFrameId = requestAnimationFrame(processFrame);
-          return;
-        }
         animationFrameId = requestAnimationFrame(processFrame);
       } catch (error) {
         console.error('Frame processing error:', error);
@@ -517,36 +428,35 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
     videoElement.width = 640;
     videoElement.height = 480;
     videoElement.muted = true;
+    videoElement.autoplay = true;
     videoElementRef.current = videoElement;
 
     const canvasElement = document.createElement('canvas');
     canvasElement.width = 640;
     canvasElement.height = 480;
-    canvasElement.style.position = 'absolute';
-    canvasElement.style.top = '0';
-    canvasElement.style.left = '0';
     canvasElementRef.current = canvasElement;
+    const ctx = canvasElement.getContext('2d');
 
-    try {
-      const mediaStream = videoTrack.stream || videoTrack.getStream?.();
-      if (!(mediaStream instanceof MediaStream)) {
-        throw new Error('No valid MediaStream available from videoTrack');
-      }
-      videoElement.srcObject = mediaStream;
-      console.log('Video stream attached');
-    } catch (error) {
-      console.error('Error attaching video stream:', error);
-      dispatch({ type: 'SET_SIGN_LANGUAGE_ERROR', error: 'errors.videoStreamFailed' });
-      return () => {};
-    }
+    navigator.mediaDevices.getUserMedia({
+      video: { width: 640, height: 480, facingMode: 'user' }
+    }).then(stream => {
+      mediaStreamRef.current = stream;
+      videoElement.srcObject = stream;
+      console.log('Webcam stream attached');
+    }).catch(error => {
+      console.error('Error accessing webcam:', error);
+      dispatch({ type: 'SET_SIGN_LANGUAGE_ERROR', error: 'errors.webcamAccessFailed' });
+    });
 
     videoElement.onloadedmetadata = () => {
-      videoElement.width = videoElement.videoWidth || 640;
-      videoElement.height = videoElement.videoHeight || 480;
-      canvasElement.width = videoElement.width;
-      canvasElement.height = videoElement.height;
+      console.log('Video metadata loaded:', {
+        width: videoElement.videoWidth,
+        height: videoElement.videoHeight,
+        readyState: videoElement.readyState,
+      });
       videoElement.play().catch(error => {
-        console.error('Failed to play video element:', error);
+        console.error('Failed to play video:', error);
+        dispatch({ type: 'SET_SIGN_LANGUAGE_ERROR', error: 'errors.videoPlayFailed' });
       });
       const checkVideoReady = setInterval(() => {
         if (videoElement.readyState >= 2 && videoElement.videoWidth > 0 && videoElement.videoHeight > 0) {
@@ -555,10 +465,8 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
           if (popupWindowRef.current) {
             popupWindowRef.current.document.body.style.background = '#000';
             popupWindowRef.current.document.body.style.margin = '0';
-            popupWindowRef.current.document.body.style.position = 'relative';
-            popupWindowRef.current.document.body.appendChild(videoElement);
             popupWindowRef.current.document.body.appendChild(canvasElement);
-            popupWindowRef.current.document.title = 'Video Input with Landmarks';
+            popupWindowRef.current.document.title = 'Video Input (Flipped)';
             console.log('Popup window opened');
           }
         }
@@ -567,91 +475,59 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
 
     const camera = new Camera(videoElement, {
       onFrame: async () => {
-        if (
-          handsRef.current &&
-          videoElement.readyState >= 2 &&
-          videoElement.videoWidth > 0 &&
-          videoElement.videoHeight > 0
-        ) {
-          await handsRef.current.send({ image: videoElement }).catch(err => console.error('Error sending frame:', err));
+        if (videoElementRef.current && canvasElementRef.current && ctx && videoElementRef.current.readyState >= 2) {
+          ctx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+          ctx.save();
+          ctx.scale(-1, 1);
+          ctx.translate(-640, 0);
+          ctx.drawImage(videoElementRef.current, 0, 0, 640, 480);
+          ctx.restore();
+          console.log('Frame drawn on canvas');
+
+          if (handsRef.current) {
+            try {
+              await handsRef.current.send({ image: videoElementRef.current });
+              console.log('Frame sent to MediaPipe');
+            } catch (err) {
+              console.error('Error sending frame to MediaPipe:', err);
+            }
+          } else {
+            console.warn('MediaPipe Hands not ready');
+          }
         } else {
-          console.warn('Video element not ready:', {
-            readyState: videoElement.readyState,
-            width: videoElement.videoWidth,
-            height: videoElement.videoHeight,
+          console.warn('Video not ready:', {
+            readyState: videoElementRef.current?.readyState,
+            width: videoElementRef.current?.videoWidth,
+            height: videoElementRef.current?.videoHeight,
           });
         }
       },
       width: 640,
       height: 480,
     });
-    camera.start().catch(error => {
+
+    camera.start().then(() => {
+      console.log('Camera started');
+    }).catch(error => {
       console.error('Error starting camera:', error);
       dispatch({ type: 'SET_SIGN_LANGUAGE_ERROR', error: 'errors.cameraStartFailed' });
     });
     cameraRef.current = camera;
 
     handsRef.current?.onResults(async (results: HandResults) => {
+      console.log('MediaPipe results received:', {
+        multiHandLandmarks: !!results.multiHandLandmarks,
+        multiHandedness: !!results.multiHandedness,
+      });
       try {
-        // Draw landmarks on canvas
-        if (canvasElementRef.current) {
-          const ctx = canvasElementRef.current.getContext('2d');
-          if (ctx) {
-            drawLandmarks(ctx, results);
-          }
-        }
-
-        // Skip prediction if no hands are detected
-        if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
-          predictionsRef.current.push({ label: 'BACKGROUND', confidence: 1.0 });
-          if (predictionsRef.current.length > 10) predictionsRef.current.shift();
-          if (unknownStartTimeRef.current === null) {
-            unknownStartTimeRef.current = performance.now();
-          }
-          const elapsedTime = performance.now() - (unknownStartTimeRef.current || performance.now());
-          if (elapsedTime >= 8000) {
-            dispatch({ type: 'CLEAR_SIGN_LANGUAGE_SUBTITLES' });
-            unknownStartTimeRef.current = null;
-            predictionsRef.current = [];
-          }
-          APP.conference._room.sendCommand('sign_language', { value: 'BACKGROUND' });
-          updateSubtitles('');
-          return;
-        }
-
         const tensor = await preprocessFrame(results);
-        if (!tensor) {
-          predictionsRef.current.push({ label: 'BACKGROUND', confidence: 1.0 });
-          if (predictionsRef.current.length > 10) predictionsRef.current.shift();
-          APP.conference._room.sendCommand('sign_language', { value: 'BACKGROUND' });
-          updateSubtitles('');
-          return;
-        }
-
-        const prediction = await predictSign(tensor);
+        const { label: prediction, confidence } = await predictSign(tensor);
         predictionsRef.current.push(prediction);
         if (predictionsRef.current.length > 10) predictionsRef.current.shift();
+        const isStable = predictionsRef.current.length === 10 &&
+          predictionsRef.current.every(p => p === prediction);
 
-        // Majority voting for stability
-        const predictionCounts: { [key: string]: { count: number; totalConfidence: number } } = {};
-        predictionsRef.current.forEach(p => {
-          if (!predictionCounts[p.label]) {
-            predictionCounts[p.label] = { count: 0, totalConfidence: 0 };
-          }
-          predictionCounts[p.label].count += 1;
-          predictionCounts[p.label].totalConfidence += p.confidence;
-        });
-
-        const mostCommon = Object.entries(predictionCounts).reduce((a, b) =>
-          a[1].count > b[1].count || (a[1].count === b[1].count && a[1].totalConfidence > b[1].totalConfidence) ? a : b
-        );
-        const stablePrediction = mostCommon[0];
-        const avgConfidence = mostCommon[1].totalConfidence / mostCommon[1].count;
-
-        // Only accept stable prediction if it has sufficient confidence and occurrences
-        const isStable = mostCommon[1].count >= 8 && avgConfidence > 0.95;
-
-        if (isStable && (stablePrediction === 'BACKGROUND' || stablePrediction === 'Unknown')) {
+        if (isStable && (prediction === 'BACKGROUND' || prediction === 'Unknown')) {
           if (!unknownStartTimeRef.current) {
             unknownStartTimeRef.current = performance.now();
           } else {
@@ -663,11 +539,11 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
             }
           }
           APP.conference._room.sendCommand('sign_language', { value: 'BACKGROUND' });
-          updateSubtitles('');
-        } else if (isStable && stablePrediction !== 'BACKGROUND') {
+          updateSubtitles('BACKGROUND', 0);
+        } else if (isStable && prediction !== 'BACKGROUND') {
           unknownStartTimeRef.current = null;
-          APP.conference._room.sendCommand('sign_language', { value: stablePrediction });
-          updateSubtitles(stablePrediction);
+          APP.conference._room.sendCommand('sign_language', { value: prediction });
+          updateSubtitles(prediction, confidence);
         }
 
         tensor.dispose();
@@ -694,12 +570,14 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
       sequenceRef.current = [];
       predictionsRef.current = [];
       unknownStartTimeRef.current = null;
+      lastStablePredictionRef.current = null;
+      predictionStateRef.current = 'BACKGROUND';
     };
   };
 
   // Wait for conference
   const waitForConference = () => {
-    return new Promise<void>((resolve) => {
+    return new Promise<void>((resolve, reject) => {
       if (APP.conference && APP.conference.isJoined()) {
         resolve();
       } else {
@@ -709,58 +587,48 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
     });
   };
 
-  const handleClick = async () => {
+  // Handle translation toggle
+  const handleTranslationToggle = async (enable: boolean) => {
+    if (enable) {
+      try {
+        await waitForConference();
+        const currentState = APP.store.getState();
+        const isListenOnly = currentState['features/sign-language']?.isListenOnly || false;
+        if (isListenOnly) {
+          alert(t('signLanguage.disableListenOnlyFirst'));
+          return;
+        }
+        animationFrameRef.current = processVideoFrames();
+        setIsTranslationEnabled(true);
+      } catch (error) {
+        console.error('Error enabling translation:', error);
+        dispatch({ type: 'SET_SIGN_LANGUAGE_ERROR', error: 'errors.conferenceNotJoined' });
+      }
+    } else {
+      dispatch({ type: 'CLEAR_SIGN_LANGUAGE_SUBTITLES' });
+      if (animationFrameRef.current) {
+        animationFrameRef.current();
+        animationFrameRef.current = null;
+        console.log('Animation frame canceled in handleClick');
+      }
+      cleanupVideoElement();
+      closePopupWindow();
+      setIsTranslationEnabled(false);
+      lastStablePredictionRef.current = null;
+      predictionStateRef.current = 'BACKGROUND';
+    }
+  };
+
+  const handleClick = () => {
     if (!isDeviceSupported) {
       dispatch({ type: 'SET_SIGN_LANGUAGE_ERROR', error: 'errors.deviceUnsupported' });
       return;
     }
     if (isListenOnly && !isTranslationEnabled) {
-      alert(t('signLanguage.disableListenOnlyFirst')); // Show popup message
+      alert(t('signLanguage.disableListenOnlyFirst'));
       return;
     }
-    setIsTranslationEnabled(prev => {
-      const newValue = !prev;
-      if (newValue) {
-        waitForConference().then(() => {
-          const currentState = APP.store.getState();
-          const isListenOnly = currentState['features/sign-language']?.isListenOnly || false;
-          if (isListenOnly) {
-            alert(t('signLanguage.disableListenOnlyFirst')); // Show popup message
-            setIsTranslationEnabled(false); // Revert state change
-            return;
-          }
-          const attemptGetStream = async (attempts = 3, delay = 500): Promise<void> => {
-            const videoTrack = getLocalVideoStream();
-            if (videoTrack && videoTrack.isVideoTrack()) {
-              try {
-                const frame = await extractFrame(videoTrack);
-                animationFrameRef.current = processVideoFrames(videoTrack);
-              } catch (error) {
-                console.error('Error processing video track:', error);
-                dispatch({ type: 'SET_SIGN_LANGUAGE_ERROR', error: 'errors.initializationFailed' });
-              }
-            } else if (attempts > 0) {
-              await new Promise(resolve => setTimeout(resolve, delay));
-              return attemptGetStream(attempts - 1, delay);
-            } else {
-              console.error('Failed to get video stream after retries');
-              dispatch({ type: 'SET_SIGN_LANGUAGE_ERROR', error: 'errors.initializationFailed' });
-            }
-          };
-          attemptGetStream();
-        });
-      } else {
-        dispatch({ type: 'CLEAR_SIGN_LANGUAGE_SUBTITLES' });
-        if (animationFrameRef.current) {
-          animationFrameRef.current();
-          animationFrameRef.current = null;
-          console.log('Animation frame canceled in handleClick');
-        }
-        cleanupVideoElement();
-        closePopupWindow();
-      }
-      return newValue;
-    });
+    handleTranslationToggle(!isTranslationEnabled);
   };
 
   return (
@@ -794,19 +662,17 @@ interface ListenOnlyButtonProps extends WithTranslation {
   dispatch: (action: any) => void;
 }
 
-const ListenOnlySignLanguageButton: React.FC<ListenOnlyButtonProps> = ({ t, 'aria-label': ariaLabel, className, isListenOnly, isTranslationEnabled, isDeviceSupported, dispatch }) => {
+const ListenOnlySignLanguageButton: React.FC<PropsWithChildren<ListenOnlyButtonProps>> = ({ t, 'aria-label': ariaLabel, className, isListenOnly, isTranslationEnabled, isDeviceSupported, dispatch }) => {
   const handleClick = () => {
     if (isTranslationEnabled && !isListenOnly) {
-      alert(t('Disable the Sign Language Button to turn on Listen Only Mode')); // Show popup message
+      alert(t('Disable the Sign Language Button to turn on Listen Only Mode'));
       return;
     }
     const newListenOnlyState = !isListenOnly;
     dispatch({ type: 'TOGGLE_LISTEN_ONLY', isListenOnly: newListenOnlyState });
     if (newListenOnlyState) {
-      // Clear subtitles when enabling Listen Only
       dispatch({ type: 'CLEAR_SIGN_LANGUAGE_SUBTITLES' });
     } else {
-      // Clear subtitles when disabling Listen Only
       dispatch({ type: 'CLEAR_SIGN_LANGUAGE_SUBTITLES' });
     }
   };
@@ -836,12 +702,13 @@ const ConnectedListenOnlySignLanguageButton = translate(connect(
 // SignLanguageOverlay component
 interface OverlayProps extends WithTranslation {
   subtitles: string;
+  confidence: number | null;
   error: string | null;
   isListenOnly: boolean;
   isSubtitlesCleared: boolean;
 }
 
-const SignLanguageOverlay: React.FC<OverlayProps> = ({ subtitles, error, t, isListenOnly, isSubtitlesCleared }) => {
+const SignLanguageOverlay: React.FC<PropsWithChildren<OverlayProps>> = ({ subtitles, confidence, error, t, isListenOnly, isSubtitlesCleared }) => {
   const [predictions, setPredictions] = useState<string>('');
 
   useEffect(() => {
@@ -853,55 +720,45 @@ const SignLanguageOverlay: React.FC<OverlayProps> = ({ subtitles, error, t, isLi
       setPredictions('');
       return;
     }
-    if (subtitles.trim() && subtitles !== 'BACKGROUND') {
+    if (subtitles.trim()) {
       if (subtitles === 'BACKSPACE') {
-        setPredictions(prev => prev.slice(0, -1)); // Remove last character
+        setPredictions(prev => prev.slice(0, -1));
+        console.log('Backspace detected, removed last character');
       } else if (subtitles === 'SPACE') {
-        setPredictions(prev => {
-          const newPredictions = prev;
-          if (subtitles == 'SPACE' && newPredictions.length > 1) {
-            (async () => {
-              try {
-                const data = await postToGemini(newPredictions);
-                if (
-                  data &&
-                  data.candidates &&
-                  Array.isArray(data.candidates) &&
-                  data.candidates[0] &&
-                  data.candidates[0].content &&
-                  data.candidates[0].content.parts &&
-                  Array.isArray(data.candidates[0].content.parts) &&
-                  data.candidates[0].content.parts[0] &&
-                  typeof data.candidates[0].content.parts[0].text === 'string'
-                ) {
-                  const resString = data.candidates[0].content.parts[0].text.trim();
-                  console.log('Gemini Response:', resString);
-                  const upperResString = resString.toUpperCase();
-                  setPredictions(upperResString.slice(-50)); // Limit to last 50 chars
-                } else {
-                  console.error('Invalid response structure from postToGemini:', data);
-                  setPredictions(newPredictions.slice(-50)); // Fallback
-                }
-              } catch (err) {
-                console.error('Failed to fetch from Gemini:', err);
-                setPredictions(newPredictions.slice(-50)); // Fallback
-              }
-            })();
-            return newPredictions.slice(-50);
+        (async () => {
+          try {
+            const data = await postToGemini(predictions);
+            if (
+              data &&
+              data.candidates &&
+              Array.isArray(data.candidates) &&
+              data.candidates[0] &&
+              data.candidates[0].content &&
+              data.candidates[0].content.parts &&
+              Array.isArray(data.candidates[0].content.parts) &&
+              data.candidates[0].content.parts[0] &&
+              typeof data.candidates[0].content.parts[0].text === 'string'
+            ) {
+              const resString = data.candidates[0].content.parts[0].text.trim();
+              console.log('Gemini Response:', resString);
+              const upperResString = resString.toUpperCase();
+              setPredictions(upperResString.slice(-50));
+            } else {
+              console.error('Invalid response structure from postToGemini:', data);
+              setPredictions(predictions.slice(-50));
+            }
+          } catch (err) {
+            console.error('Failed to fetch from Gemini:', err);
+            setPredictions(predictions.slice(-50));
           }
-          return newPredictions.slice(-50);
-        });
-      } else {
-        setPredictions(prev => {
-          const newPredictions = prev + subtitles;
-          console.log('Updated predictions:', newPredictions);
-          return newPredictions.slice(-50);
-        });
+        })();
+      } else if (subtitles !== 'BACKGROUND') {
+        setPredictions(prev => (prev + subtitles).slice(-50));
+        console.log('Updated predictions:', prev + subtitles);
       }
     }
   }, [subtitles, error, t, isSubtitlesCleared]);
 
-  // Gemini backend POST function
   const postToGemini = async (text: string) => {
     const prompt = text.replace(/\s/g, '');
     console.log('Request prompt:', prompt);
@@ -993,6 +850,7 @@ const SignLanguageOverlay: React.FC<OverlayProps> = ({ subtitles, error, t, isLi
 const ConnectedSignLanguageOverlay = withTranslation()(connect(
   (state: any) => ({
     subtitles: state['features/sign-language']?.text || '',
+    confidence: state['features/sign-language']?.confidence || null,
     error: state['features/sign-language']?.error || null,
     isListenOnly: state['features/sign-language']?.isListenOnly || false,
     isSubtitlesCleared: state['features/sign-language']?.isSubtitlesCleared || false,
