@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useDispatch, useSelector } from 'react-redux';
 import { makeStyles } from 'tss-react/mui';
-import { ConnectedSignLanguageButton, ConnectedListenOnlySignLanguageButton, ConnectedDebugSignLanguageButton } from './SignLanguageButton';
+import { ConnectedSignLanguageButton, ConnectedListenOnlySignLanguageButton } from './SignLanguageButton';
 import SignLanguageButton from './SignLanguageButton';
 import { IReduxState } from '../../../app/types';
 import { isMobileBrowser } from '../../../base/environment/utils';
@@ -308,11 +308,6 @@ export default function Toolbox({
                                     key="listenOnlySignLanguage"
                                     className="toolbox-button"
                                     aria-label={t('Sign Language Listen Only')}
-                                />
-                                <ConnectedDebugSignLanguageButton
-                                    key="debugSignLanguage"
-                                    className="toolbox-button"
-                                    aria-label={t('Sign Language Debug')}
                                 />
                                 </>
                             )}
