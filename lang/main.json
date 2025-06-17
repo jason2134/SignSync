@@ -1221,6 +1221,7 @@
     "toggleTopPanelLabel": "Toggle top panel",
     "toolbar": {
         "Settings": "Settings",
+        "debug": "Debug",
         "signLanguage": "Sign Language",
         "listenOnlySignLanguage": "Sign Language Listen Only",
         "accessibilityLabel": {

@@ -4,11 +4,20 @@ import { translate } from '../../../base/i18n/functions';
 import { withTranslation, WithTranslation } from 'react-i18next';
 import { connect } from 'react-redux';
 import * as tf from '@tensorflow/tfjs';
-import { Hands, Results as HandResults } from '@mediapipe/hands';
+import { Hands, Results as HandResults, HAND_CONNECTIONS, NormalizedLandmarkList } from '@mediapipe/hands';
+import { drawConnectors, drawLandmarks } from '@mediapipe/drawing_utils';
 import { Camera } from '@mediapipe/camera_utils';
 import '@tensorflow/tfjs-backend-webgl';
 import JitsiMeetJS from '../../../base/lib-jitsi-meet';
 import ReducerRegistry from '../../../base/redux/ReducerRegistry';
+
+// Custom DrawingOptions interface to resolve TypeScript error
+interface DrawingOptions {
+  color?: string;
+  fillColor?: string;
+  lineWidth?: number;
+  radius?: number;
+}
 
 // Define single-hand and two-hand signs
 const SINGLE_HAND_SIGNS = ['C', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10'];
@@ -84,7 +93,7 @@ const extractKeypoints = (results: HandResults | null): KeypointFrame => {
     const handednessData = results.multiHandedness[idx];
 
     const keypoints = landmarks
-      .map((landmark: any) => [1 - landmark.x, landmark.y, landmark.z])
+      .map((landmark: any) => [1 - landmark.x, landmark.y, landmark.z]) // Flip x for mirrored training data
       .flat();
 
     if (keypoints.length !== LANDMARK_COUNT * COORDS_PER_LANDMARK) {
@@ -106,7 +115,6 @@ const extractKeypoints = (results: HandResults | null): KeypointFrame => {
     }
   }
 
-  // Log keypoints for single-hand cases
   if (handCount === 1) {
     console.log('Single hand detected:', {
       leftHand: leftHand.some(val => Math.abs(val) > 0.001) ? leftHand : 'zeros',
@@ -123,8 +131,7 @@ const extractKeypoints = (results: HandResults | null): KeypointFrame => {
  * Returns zeros for undetected hands or invalid scaling.
  */
 const normalizeKeypoints = (sequence: number[][]): number[][] => {
-  // Validate input
-  const expectedLength = 126; // 42 landmarks * 3 coords (x, y, z)
+  const expectedLength = 126;
   if (!Array.isArray(sequence) || sequence.some(frame => frame.length !== expectedLength)) {
     throw new Error(`Invalid sequence: each frame must have ${expectedLength} elements`);
   }
@@ -132,30 +139,26 @@ const normalizeKeypoints = (sequence: number[][]): number[][] => {
   const normalizedSequence: number[][] = [];
 
   for (const frame of sequence) {
-    // Reshape frame to (42 landmarks, 3 coords)
     const reshapedFrame: number[][] = [];
     for (let i = 0; i < 42; i++) {
       const base = i * 3;
       reshapedFrame.push([frame[base], frame[base + 1], frame[base + 2]]);
     }
 
-    // Compute wrist midpoint
-    const wristLeft = reshapedFrame[0]; // Left wrist at index 0
-    const wristRight = reshapedFrame[21]; // Right wrist at index 21
+    const wristLeft = reshapedFrame[0];
+    const wristRight = reshapedFrame[21];
     const origin = [
       (wristLeft[0] + wristRight[0]) / 2.0,
       (wristLeft[1] + wristRight[1]) / 2.0,
       (wristLeft[2] + wristRight[2]) / 2.0
     ];
 
-    // Center all keypoints around the midpoint
     const centeredFrame = reshapedFrame.map(landmark => [
       landmark[0] - origin[0],
       landmark[1] - origin[1],
       landmark[2] - origin[2]
     ]);
 
-    // Flatten back to length-126 vector
     const normalizedFrame: number[] = centeredFrame.flat();
     normalizedSequence.push(normalizedFrame);
   }
@@ -185,8 +188,31 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
   const unknownStartTimeRef = useRef<number | null>(null);
   const videoElementRef = useRef<HTMLVideoElement | null>(null);
   const canvasElementRef = useRef<HTMLCanvasElement | null>(null);
-  const popupWindowRef = useRef<Window | null>(null);
   const isCleanedUp = useRef<boolean>(false);
+  const isProcessingFrame = useRef<boolean>(false);
+  const wasmErrorCount = useRef<number>(0);
+
+  // Initialize MediaPipe Hands
+  const initializeHands = async (): Promise<Hands | null> => {
+    try {
+      const hands = new Hands({
+        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${file}`,
+      });
+      hands.setOptions({
+        maxNumHands: 2,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.8,
+        minTrackingConfidence: 0.8,
+      });
+      await hands.initialize();
+      console.log('Hands initialized successfully');
+      return hands;
+    } catch (error) {
+      console.error('Hands initialization failed:', error);
+      dispatch({ type: 'SET_SIGN_LANGUAGE_ERROR', error: 'errors.initializationFailed' });
+      return null;
+    }
+  };
 
   // Check device compatibility
   useEffect(() => {
@@ -209,99 +235,87 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
     checkDevice();
   }, [dispatch]);
 
-  // Helper function to clean up video element
-  const cleanupVideoElement = () => {
-    if (videoElementRef.current) {
-      videoElementRef.current.srcObject = null;
-      videoElementRef.current.style.display = 'none';
-      if (videoElementRef.current.parentNode) {
-        videoElementRef.current.parentNode.removeChild(videoElementRef.current);
-      }
-      videoElementRef.current = null;
-      console.log('Video element cleaned up');
-    }
-    if (canvasElementRef.current) {
-      if (canvasElementRef.current.parentNode) {
-        canvasElementRef.current.parentNode.removeChild(canvasElementRef.current);
-      }
-      canvasElementRef.current = null;
-      console.log('Canvas element cleaned up');
-    }
-  };
-
-  // Helper function to close popup window
-  const closePopupWindow = () => {
-    if (popupWindowRef.current && !popupWindowRef.current.closed) {
-      try {
-        popupWindowRef.current.close();
-        console.log('Popup window closed');
-      } catch (error) {
-        console.error('Error closing popup window:', error);
-      }
-      popupWindowRef.current = null;
-    }
-  };
-
   // Initialize MediaPipe Hands and TensorFlow model
   useEffect(() => {
     let isMounted = true;
 
     const initialize = async () => {
       try {
-        // Initialize MediaPipe Hands
-        const hands = new Hands({
-          locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${file}`,
-        });
-        hands.setOptions({
-          maxNumHands: 2,
-          modelComplexity: 1,
-          minDetectionConfidence: 0.8,
-          minTrackingConfidence: 0.8,
-        });
-        await hands.initialize();
-        if (!isMounted) return;
+        const hands = await initializeHands();
+        if (!isMounted || !hands) return;
         handsRef.current = hands;
 
-        // Set TensorFlow backend
         await tf.setBackend('webgl');
 
-        // Load model
         const modelPath = `static/sign_language_model_tfjs_conv/model.json`;
         const loadedModel = await tf.loadLayersModel(modelPath);
 
-        // Warm up model
         tf.tidy(() => {
           const dummyInput = tf.zeros([1, 30, 126]);
           loadedModel.predict(dummyInput).dispose();
           dummyInput.dispose();
         });
 
-        // Init listener for sign language
         APP.conference._room.addCommandListener('sign_language', (data, participantId) => {
           const detectedSign = data.value;
           console.log(`Received sign from ${participantId}: ${detectedSign}`);
           const currentState = APP.store.getState();
           const isListenOnly = currentState['features/sign-language']?.isListenOnly || false;
-          console.log("ListenOnly State", isListenOnly);
           if (isListenOnly) {
-            console.log("Dispatching sign");
-            dispatch({
-              type: 'UPDATE_SIGN_LANGUAGE_SUBTITLES',
-              text: detectedSign,
-            });
+            dispatch({ type: 'UPDATE_SIGN_LANGUAGE_SUBTITLES', text: detectedSign });
           }
         });
+
+        const canvasElement = document.createElement('canvas');
+        canvasElement.style.position = 'absolute';
+        canvasElement.style.top = '0';
+        canvasElement.style.left = '0';
+        canvasElement.style.zIndex = '1000';
+        canvasElement.style.pointerEvents = 'none';
+        canvasElement.width = 320;
+        canvasElement.height = 240;
+
+        const findVideoAndAppendCanvas = () => {
+          const videoElements = document.querySelectorAll('video');
+          for (const video of videoElements) {
+            if (video.srcObject instanceof MediaStream || video.readyState >= 2) {
+              const parent = video.parentElement;
+              if (parent) {
+                parent.appendChild(canvasElement);
+                canvasElementRef.current = canvasElement;
+                canvasElement.width = video.videoWidth || 320;
+                canvasElement.height = video.videoHeight || 240;
+                console.log('Canvas attached to video parent:', parent);
+                break;
+              }
+            }
+          }
+          if (!canvasElementRef.current) {
+            console.warn('No active video element found, retrying...');
+            setTimeout(findVideoAndAppendCanvas, 500);
+          }
+        };
+
+        findVideoAndAppendCanvas();
+
+        const observer = new MutationObserver((mutations, obs) => {
+          const videoFound = document.querySelector('video[srcObject], video[readyState]');
+          if (videoFound && !canvasElementRef.current) {
+            findVideoAndAppendCanvas();
+            obs.disconnect();
+          }
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
 
         if (!isMounted) {
           loadedModel.dispose();
           return;
         }
         setModel(loadedModel);
-        
         setLabels(['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M',
-                    'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z',
-                    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9','10',
-                    'SPACE', 'BACKSPACE','BACKGROUND']);
+          'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z',
+          '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10',
+          'SPACE', 'BACKSPACE', 'BACKGROUND']);
       } catch (error) {
         console.error('Initialization failed:', error);
         if (isMounted) {
@@ -335,14 +349,18 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
         setModel(null);
         console.log('Model disposed');
       }
-      cleanupVideoElement();
-      closePopupWindow();
+      if (canvasElementRef.current) {
+        if (canvasElementRef.current.parentNode) {
+          canvasElementRef.current.parentNode.removeChild(canvasElementRef.current);
+        }
+        canvasElementRef.current = null;
+        console.log('Canvas element cleaned up');
+      }
     };
   }, [dispatch]);
 
   // Validate sequence to ensure it contains meaningful data
   const isValidSequence = (sequence: number[][], expectedSign?: string): boolean => {
-    // If no expected sign is provided, use recent predictions to determine hand requirements
     const requiresTwoHands = expectedSign
       ? TWO_HAND_SIGNS.includes(expectedSign)
       : predictionsRef.current.some(p => TWO_HAND_SIGNS.includes(p.label));
@@ -360,10 +378,9 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
   const preprocessFrame = async (results: HandResults): Promise<tf.Tensor | null> => {
     if (!handsRef.current || !results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
       console.log('No hands detected, skipping prediction');
-      return null; // Skip prediction if no hands detected
+      return null;
     }
 
-    const handCount = results.multiHandLandmarks.length;
     const tensor = tf.tidy(() => {
       const keypoints = extractKeypoints(results);
       sequenceRef.current.push(keypoints);
@@ -374,14 +391,12 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
         ? [...new Array(30 - sequenceRef.current.length).fill(new Array(126).fill(0)), ...sequenceRef.current]
         : sequenceRef.current;
 
-      // Check if sequence is valid
       if (!isValidSequence(paddedSequence)) {
         console.log('Invalid sequence, returning zero tensor');
         return tf.zeros([1, 30, 126]);
       }
 
-      // Reject two-hand signs if only one hand is detected
-      if (handCount < 2 && predictionsRef.current.some(p => TWO_HAND_SIGNS.includes(p.label))) {
+      if (results.multiHandLandmarks.length < 2 && predictionsRef.current.some(p => TWO_HAND_SIGNS.includes(p.label))) {
         console.log('Two-hand sign expected but only one hand detected, returning zero tensor');
         return tf.zeros([1, 30, 126]);
       }
@@ -415,7 +430,6 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
       const confidence = probs[labelIndex];
       const predictedLabel = labels[labelIndex];
 
-      // Check if the predicted label requires two hands
       if (TWO_HAND_SIGNS.includes(predictedLabel)) {
         const sequenceValidForTwoHands = isValidSequence(sequenceRef.current, predictedLabel);
         if (!sequenceValidForTwoHands) {
@@ -436,7 +450,7 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
 
   // Update subtitles
   const updateSubtitles = (text: string) => {
-    if (isListenOnly) return; // Prevent local predictions from updating subtitles when listen-only is active
+    if (isListenOnly) return;
     if (APP.store) {
       dispatch({
         type: 'UPDATE_SIGN_LANGUAGE_SUBTITLES',
@@ -452,14 +466,14 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
     const localTracks = conference.getLocalTracks();
     const videoTrack = localTracks.find(track => track.getType() === 'video');
     if (videoTrack && videoTrack.isVideoTrack()) {
-        const mediaStreamTrack = videoTrack.getTrack();
-        if (mediaStreamTrack && mediaStreamTrack.readyState === 'live') {
-          const settings = mediaStreamTrack.getSettings();
-          console.log(`Video track resolution: ${settings.width}x${settings.height}`);
-        } else {
-          console.warn('Video track is not live or unavailable');
-        }
+      const mediaStreamTrack = videoTrack.getTrack();
+      if (mediaStreamTrack && mediaStreamTrack.readyState === 'live') {
+        const settings = mediaStreamTrack.getSettings();
+        console.log(`Video track resolution: ${settings.width}x${settings.height}`);
+      } else {
+        console.warn('Video track is not live or unavailable');
       }
+    }
     return videoTrack || null;
   };
 
@@ -476,117 +490,146 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
     try {
       const bitmap = await imageCapture.grabFrame();
       const canvas = document.createElement('canvas');
-      canvas.width = 640;
-      canvas.height = 480;
+      canvas.width = 320;
+      canvas.height = 240;
       const ctx = canvas.getContext('2d');
       if (!ctx) throw new Error('No canvas context');
-      ctx.drawImage(bitmap, 0, 0, 640, 480);
-      return ctx.getImageData(0, 0, 640, 480);
+      ctx.drawImage(bitmap, 0, 0, 320, 240);
+      return ctx.getImageData(0, 0, 320, 240);
     } catch (error) {
       throw error;
     }
   };
 
-  // Draw landmarks on canvas
-  const drawLandmarks = (ctx: CanvasRenderingContext2D, results: HandResults) => {
+  // Draw landmarks on canvas using MediaPipe draw_utils, with x-flip for mirror mode
+  const drawHandLandmarks = (ctx: CanvasRenderingContext2D, results: HandResults) => {
+    ctx.save(); // Save canvas state
     ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
     ctx.globalCompositeOperation = 'source-over';
 
     if (results.multiHandLandmarks && results.multiHandedness) {
       for (let idx = 0; idx < results.multiHandLandmarks.length; idx++) {
-        const landmarks = results.multiHandLandmarks[idx];
+        const landmarks: NormalizedLandmarkList = results.multiHandLandmarks[idx];
         const handedness = results.multiHandedness[idx].label;
 
-        // Define colors based on hand
-        const color = handedness === 'Right' ? '#00FF00' : '#FF0000'; // Green for right, red for left
+        // Flip x-coordinates to match mirrored video feed
+        const mirroredLandmarks = landmarks.map(landmark => ({
+          ...landmark,
+          x: 1 - landmark.x,
+        }));
 
-        // Draw connections
-        const connections = [
-          [0, 1], [1, 2], [2, 3], [3, 4], // Thumb
-          [0, 5], [5, 6], [6, 7], [7, 8], // Index
-          [0, 9], [9, 10], [10, 11], [11, 12], // Middle
-          [0, 13], [13, 14], [14, 15], [15, 16], // Ring
-          [0, 17], [17, 18], [18, 19], [19, 20], // Pinky
-          [5, 9], [9, 13], [13, 17], // Palm
-        ];
+        const landmarkStyles: DrawingOptions = {
+          color: '#00FF00FF', // Green for right, red for left (RGBA)
+          fillColor: '#00FF00FF',
+          radius: 5,
+        };
+        const connectionStyles: DrawingOptions = {
+          color: '#00FF00FF',
+          lineWidth: 2,
+        };
 
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 2;
-        for (const [start, end] of connections) {
-          const startLandmark = landmarks[start];
-          const endLandmark = landmarks[end];
-          ctx.beginPath();
-          ctx.moveTo((1 - startLandmark.x) * ctx.canvas.width, startLandmark.y * ctx.canvas.height);
-          ctx.lineTo((1 - endLandmark.x) * ctx.canvas.width, endLandmark.y * ctx.canvas.height);
-          ctx.stroke();
-        }
-
-        // Draw landmarks
-        ctx.fillStyle = color;
-        for (const landmark of landmarks) {
-          ctx.beginPath();
-          ctx.arc(
-            (1 - landmark.x) * ctx.canvas.width,
-            landmark.y * ctx.canvas.height,
-            5,
-            0,
-            2 * Math.PI
-          );
-          ctx.fill();
-        }
+        drawConnectors(ctx, mirroredLandmarks, HAND_CONNECTIONS, connectionStyles);
+        drawLandmarks(ctx, mirroredLandmarks, landmarkStyles);
       }
     }
+    ctx.restore(); // Restore canvas state
   };
 
-  // Process video frames
+  // Process video frames with enhanced throttling
   const processVideoFrames = (videoTrack: any): (() => void) => {
     let shouldContinue = true;
     let animationFrameId: number | null = null;
 
     const processFrame = async (timestamp: number) => {
-      if (!shouldContinue || !videoTrack || isCleanedUp.current) {
-        console.log('Stopping frame processing');
+      if (!shouldContinue || !videoTrack || isCleanedUp.current || isProcessingFrame.current) {
+        animationFrameId = requestAnimationFrame(processFrame);
         return;
       }
-      if (timestamp - lastFrameTimeRef.current < 66) {
+      if (timestamp - lastFrameTimeRef.current < 125) { // ~8 FPS
         animationFrameId = requestAnimationFrame(processFrame);
         return;
       }
       lastFrameTimeRef.current = timestamp;
+      isProcessingFrame.current = true;
 
       try {
         if (sequenceRef.current.length < 30) {
           animationFrameId = requestAnimationFrame(processFrame);
+          isProcessingFrame.current = false;
           return;
         }
+
+        const mediaStreamTrack = videoTrack.getTrack();
+        if (mediaStreamTrack && mediaStreamTrack.readyState === 'live') {
+          const settings = mediaStreamTrack.getSettings();
+          const canvas = canvasElementRef.current;
+          if (canvas && (canvas.width !== settings.width || canvas.height !== settings.height)) {
+            canvas.width = settings.width || 320;
+            canvas.height = settings.height || 240;
+            console.log(`Updated canvas resolution: ${settings.width}x${settings.height}`);
+          }
+        } else {
+          console.warn('Video track not live, skipping frame');
+          animationFrameId = requestAnimationFrame(processFrame);
+          isProcessingFrame.current = false;
+          return;
+        }
+
+        if (canvasElementRef.current) {
+          const ctx = canvasElementRef.current.getContext('2d');
+          if (ctx) {
+            const videoElement = videoElementRef.current;
+            if (videoElement && handsRef.current && videoElement.readyState >= 2) {
+              await handsRef.current.send({ image: videoElement }).catch(err => {
+                console.error('Error sending frame:', err, {
+                  videoReadyState: videoElement.readyState,
+                  videoDimensions: `${videoElement.videoWidth}x${videoElement.videoHeight}`,
+                });
+                if (err.message.includes('Aborted')) {
+                  wasmErrorCount.current += 1;
+                  if (wasmErrorCount.current >= 3) {
+                    console.warn('Multiple WASM errors detected, reinitializing Hands...');
+                    handsRef.current?.close().catch(e => console.error('Error closing Hands:', e));
+                    initializeHands().then(newHands => {
+                      if (newHands) {
+                        handsRef.current = newHands;
+                        wasmErrorCount.current = 0;
+                        console.log('Hands reinitialized successfully');
+                      }
+                    });
+                  }
+                }
+                dispatch({ type: 'SET_SIGN_LANGUAGE_ERROR', error: 'errors.frameProcessingFailed' });
+              });
+            } else {
+              console.warn('Video element not ready or handsRef is null', {
+                videoReadyState: videoElement?.readyState,
+                handsRefExists: !!handsRef.current,
+              });
+            }
+          }
+        }
+
         animationFrameId = requestAnimationFrame(processFrame);
       } catch (error) {
         console.error('Frame processing error:', error);
         dispatch({ type: 'SET_SIGN_LANGUAGE_ERROR', error: 'errors.frameProcessingFailed' });
+      } finally {
+        isProcessingFrame.current = false;
       }
     };
 
     const videoElement = document.createElement('video');
-    videoElement.width = 640;
-    videoElement.height = 480;
     videoElement.muted = true;
     videoElementRef.current = videoElement;
 
-    const canvasElement = document.createElement('canvas');
-    canvasElement.width = 640;
-    canvasElement.height = 480;
-    canvasElement.style.position = 'absolute';
-    canvasElement.style.top = '0';
-    canvasElement.style.left = '0';
-    canvasElementRef.current = canvasElement;
-
     try {
       const mediaStream = videoTrack.stream || videoTrack.getStream?.();
-      if (!(mediaStream instanceof MediaStream)) {
-        throw new Error('No valid MediaStream available from videoTrack');
+      if (!(mediaStream instanceof MediaStream) || !mediaStream.active) {
+        throw new Error('No valid or active MediaStream available from videoTrack');
       }
       videoElement.srcObject = mediaStream;
-      console.log('Video stream attached');
+      videoElement.play().catch(err => console.error('Failed to play video:', err));
     } catch (error) {
       console.error('Error attaching video stream:', error);
       dispatch({ type: 'SET_SIGN_LANGUAGE_ERROR', error: 'errors.videoStreamFailed' });
@@ -594,71 +637,59 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
     }
 
     videoElement.onloadedmetadata = () => {
-      videoElement.width = videoElement.videoWidth || 640;
-      videoElement.height = videoElement.videoHeight || 480;
-      canvasElement.width = videoElement.width;
-      canvasElement.height = videoElement.height;
-      videoElement.play().catch(error => {
-        console.error('Failed to play video element:', error);
-      });
-      const checkVideoReady = setInterval(() => {
-        if (videoElement.readyState >= 2 && videoElement.videoWidth > 0 && videoElement.videoHeight > 0) {
-          clearInterval(checkVideoReady);
-          popupWindowRef.current = window.open('', 'SignLanguageDebug', 'width=660,height=500');
-          if (popupWindowRef.current) {
-            popupWindowRef.current.document.body.style.background = '#000';
-            popupWindowRef.current.document.body.style.margin = '0';
-            popupWindowRef.current.document.body.style.position = 'relative';
-            popupWindowRef.current.document.body.appendChild(videoElement);
-            popupWindowRef.current.document.body.appendChild(canvasElement);
-            popupWindowRef.current.document.title = 'Video Input with Landmarks';
-            console.log('Popup window opened');
-          }
+      console.log('Video element ready:', videoElement.readyState);
+      if (canvasElementRef.current) {
+        const mediaStreamTrack = videoTrack.getTrack();
+        if (mediaStreamTrack && mediaStreamTrack.readyState === 'live') {
+          const settings = mediaStreamTrack.getSettings();
+          canvasElementRef.current.width = settings.width || 320;
+          canvasElementRef.current.height = settings.height || 240;
+          console.log(`Video track resolution: ${settings.width}x${settings.height}`);
         }
-      }, 100);
+      }
+    };
+
+    videoElement.onerror = () => {
+      console.error('Video element error');
+      dispatch({ type: 'SET_SIGN_LANGUAGE_ERROR', error: 'errors.videoStreamFailed' });
     };
 
     const camera = new Camera(videoElement, {
       onFrame: async () => {
-        if (
-          handsRef.current &&
-          videoElement.readyState >= 2 &&
-          videoElement.videoWidth > 0 &&
-          videoElement.videoHeight > 0
-        ) {
+        const videoElement = videoElementRef.current;
+        if (handsRef.current && videoElement && videoElement.readyState >= 2 && !isProcessingFrame.current) {
           await handsRef.current.send({ image: videoElement }).catch(err => console.error('Error sending frame:', err));
-        } else {
-          console.warn('Video element not ready:', {
-            readyState: videoElement.readyState,
-            width: videoElement.videoWidth,
-            height: videoElement.videoHeight,
-          });
         }
       },
-      width: 640,
-      height: 480,
+      width: 320,
+      height: 240,
     });
-    camera.start().catch(error => {
-      console.error('Error starting camera:', error);
+    camera.start().catch(err => {
+      console.error('Error starting camera:', err);
       dispatch({ type: 'SET_SIGN_LANGUAGE_ERROR', error: 'errors.cameraStartFailed' });
     });
     cameraRef.current = camera;
 
     handsRef.current?.onResults(async (results: HandResults) => {
       try {
-        // Draw landmarks on canvas
+        console.log('onResults called:', {
+          multiHandLandmarks: results.multiHandLandmarks?.length,
+          multiHandedness: results.multiHandedness?.length,
+          timestamp: performance.now(),
+          videoResolution: videoElementRef.current ? `${videoElementRef.current.videoWidth}x${videoElementRef.current.videoHeight}` : 'unknown',
+        });
+
         if (canvasElementRef.current) {
           const ctx = canvasElementRef.current.getContext('2d');
           if (ctx) {
-            drawLandmarks(ctx, results);
+            drawHandLandmarks(ctx, results);
           }
         }
 
-        // Skip prediction if no hands are detected
         if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
           console.log('No hands detected, pushing BACKGROUND prediction');
           predictionsRef.current.push({ label: 'BACKGROUND', confidence: 1.0 });
-          if (predictionsRef.current.length > 10) predictionsRef.current.shift();
+          if (predictionsRef.current.length > 5) predictionsRef.current.shift(); // Reduced window size
           if (unknownStartTimeRef.current === null) {
             unknownStartTimeRef.current = performance.now();
           }
@@ -673,7 +704,6 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
           return;
         }
 
-        // Log single-hand detection
         if (results.multiHandLandmarks.length === 1) {
           console.log('Single hand detected, checking for single-hand signs');
         }
@@ -682,7 +712,7 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
         if (!tensor) {
           console.log('No valid tensor, pushing BACKGROUND prediction');
           predictionsRef.current.push({ label: 'BACKGROUND', confidence: 1.0 });
-          if (predictionsRef.current.length > 10) predictionsRef.current.shift();
+          if (predictionsRef.current.length > 5) predictionsRef.current.shift();
           APP.conference._room.sendCommand('sign_language', { value: 'BACKGROUND' });
           updateSubtitles('');
           return;
@@ -690,12 +720,10 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
 
         const prediction = await predictSign(tensor);
         predictionsRef.current.push(prediction);
-        if (predictionsRef.current.length > 10) predictionsRef.current.shift();
+        if (predictionsRef.current.length > 5) predictionsRef.current.shift();
 
-        // Log prediction for debugging
         console.log('Prediction result:', prediction);
 
-        // Majority voting for stability
         const predictionCounts: { [key: string]: { count: number; totalConfidence: number } } = {};
         predictionsRef.current.forEach(p => {
           if (!predictionCounts[p.label]) {
@@ -711,7 +739,7 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
         const stablePrediction = mostCommon[0];
         const avgConfidence = mostCommon[1].totalConfidence / mostCommon[1].count;
 
-        const isStable = mostCommon[1].count >= 8 && avgConfidence > 0.95;
+        const isStable = mostCommon[1].count >= 4 && avgConfidence > 0.95; // Relaxed stability criteria
 
         if (isStable && (stablePrediction === 'BACKGROUND' || stablePrediction === 'Unknown')) {
           if (!unknownStartTimeRef.current) {
@@ -728,7 +756,6 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
           updateSubtitles('');
         } else if (isStable && stablePrediction !== 'BACKGROUND') {
           unknownStartTimeRef.current = null;
-          // Verify hand count for two-hand signs
           if (TWO_HAND_SIGNS.includes(stablePrediction) && results.multiHandLandmarks.length < 2) {
             console.log(`Stable prediction ${stablePrediction} is a two-hand sign but only ${results.multiHandLandmarks.length} hand(s) detected; defaulting to BACKGROUND`);
             APP.conference._room.sendCommand('sign_language', { value: 'BACKGROUND' });
@@ -741,7 +768,24 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
 
         tensor.dispose();
       } catch (error) {
-        console.error('Error processing MediaPipe results:', error);
+        console.error('Error processing MediaPipe results:', error, {
+          multiHandLandmarks: results.multiHandLandmarks?.length,
+          multiHandedness: results.multiHandedness?.length,
+        });
+        if (error.message.includes('Aborted')) {
+          wasmErrorCount.current += 1;
+          if (wasmErrorCount.current >= 3) {
+            console.warn('Multiple WASM errors detected, reinitializing Hands...');
+            handsRef.current?.close().catch(e => console.error('Error closing Hands:', e));
+            initializeHands().then(newHands => {
+              if (newHands) {
+                handsRef.current = newHands;
+                wasmErrorCount.current = 0;
+                console.log('Hands reinitialized successfully');
+              }
+            });
+          }
+        }
       }
     });
 
@@ -749,17 +793,15 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
     return () => {
       shouldContinue = false;
       isCleanedUp.current = true;
-      if (animationFrameId) {
-        cancelAnimationFrame(animationFrameId);
-        console.log('Animation frame canceled in processVideoFrames');
-      }
+      if (animationFrameId) cancelAnimationFrame(animationFrameId);
       if (cameraRef.current) {
         cameraRef.current.stop();
         cameraRef.current = null;
-        console.log('Camera stopped in processVideoFrames');
       }
-      cleanupVideoElement();
-      closePopupWindow();
+      if (videoElementRef.current) {
+        videoElementRef.current.srcObject = null;
+        videoElementRef.current = null;
+      }
       sequenceRef.current = [];
       predictionsRef.current = [];
       unknownStartTimeRef.current = null;
@@ -784,7 +826,7 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
       return;
     }
     if (isListenOnly && !isTranslationEnabled) {
-      alert(t('signLanguage.disableListenOnlyFirst')); // Show popup message
+      alert(t('signLanguage.disableListenOnlyFirst'));
       return;
     }
     setIsTranslationEnabled(prev => {
@@ -794,8 +836,8 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
           const currentState = APP.store.getState();
           const isListenOnly = currentState['features/sign-language']?.isListenOnly || false;
           if (isListenOnly) {
-            alert(t('signLanguage.disableListenOnlyFirst')); // Show popup message
-            setIsTranslationEnabled(false); // Revert state change
+            alert(t('signLanguage.disableListenOnlyFirst'));
+            setIsTranslationEnabled(false);
             return;
           }
           const attemptGetStream = async (attempts = 3, delay = 500): Promise<void> => {
@@ -825,8 +867,6 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
           animationFrameRef.current = null;
           console.log('Animation frame canceled in handleClick');
         }
-        cleanupVideoElement();
-        closePopupWindow();
       }
       return newValue;
     });
@@ -866,16 +906,14 @@ interface ListenOnlyButtonProps extends WithTranslation {
 const ListenOnlySignLanguageButton: React.FC<ListenOnlyButtonProps> = ({ t, 'aria-label': ariaLabel, className, isListenOnly, isTranslationEnabled, isDeviceSupported, dispatch }) => {
   const handleClick = () => {
     if (isTranslationEnabled && !isListenOnly) {
-      alert(t('Disable the Sign Language Button to turn on Listen Only Mode')); // Show popup message
+      alert(t('Disable the Sign Language Button to turn on Listen Only Mode'));
       return;
     }
     const newListenOnlyState = !isListenOnly;
     dispatch({ type: 'TOGGLE_LISTEN_ONLY', isListenOnly: newListenOnlyState });
     if (newListenOnlyState) {
-      // Clear subtitles when enabling Listen Only
       dispatch({ type: 'CLEAR_SIGN_LANGUAGE_SUBTITLES' });
     } else {
-      // Clear subtitles when disabling Listen Only
       dispatch({ type: 'CLEAR_SIGN_LANGUAGE_SUBTITLES' });
     }
   };
@@ -924,11 +962,11 @@ const SignLanguageOverlay: React.FC<OverlayProps> = ({ subtitles, error, t, isLi
     }
     if (subtitles.trim() && subtitles !== 'BACKGROUND') {
       if (subtitles === 'BACKSPACE') {
-        setPredictions(prev => prev.slice(0, -1)); // Remove last character
+        setPredictions(prev => prev.slice(0, -1));
       } else if (subtitles === 'SPACE') {
         setPredictions(prev => {
           const newPredictions = prev;
-          if (subtitles == 'SPACE' && newPredictions.length > 1) {
+          if (subtitles === 'SPACE' && newPredictions.length > 1) {
             (async () => {
               try {
                 const data = await postToGemini(newPredictions);
@@ -946,14 +984,14 @@ const SignLanguageOverlay: React.FC<OverlayProps> = ({ subtitles, error, t, isLi
                   const resString = data.candidates[0].content.parts[0].text.trim();
                   console.log('Gemini Response:', resString);
                   const upperResString = resString.toUpperCase();
-                  setPredictions(upperResString.slice(-50)); // Limit to last 50 chars
+                  setPredictions(upperResString.slice(-50));
                 } else {
                   console.error('Invalid response structure from postToGemini:', data);
-                  setPredictions(newPredictions.slice(-50)); // Fallback
+                  setPredictions(newPredictions.slice(-50));
                 }
               } catch (err) {
                 console.error('Failed to fetch from Gemini:', err);
-                setPredictions(newPredictions.slice(-50)); // Fallback
+                setPredictions(newPredictions.slice(-50));
               }
             })();
             return newPredictions.slice(-50);
@@ -970,7 +1008,6 @@ const SignLanguageOverlay: React.FC<OverlayProps> = ({ subtitles, error, t, isLi
     }
   }, [subtitles, error, t, isSubtitlesCleared]);
 
-  // Gemini backend POST function
   const postToGemini = async (text: string) => {
     const prompt = text.replace(/\s/g, '');
     console.log('Request prompt:', prompt);

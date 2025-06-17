@@ -104,6 +104,18 @@ app.post('/ask', async (req, res) => {
   Input: himynameisasimhoyarutou  
   Output: Hi, my name is Asim. How are you?
 
+  Input: HEGLLO
+  Output: Hello.
+
+  Input: WZOO
+  Output: Zoo.
+
+  Input: HESLLO
+  Output: Hello.
+
+  Input: SEFHSEOGIHSROBH
+  Output: S, E, F, H, S, E, O, G, I, H, S, R, O, B, H
+
   Now, correct this input:
   Input: ${userPrompt}
   Output:`;
