@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef, Component, ErrorInfo } from 'react';
 import { translate } from '../../../base/i18n/functions';
 import { withTranslation, WithTranslation } from 'react-i18next';
@@ -8,6 +9,10 @@ import { Camera } from '@mediapipe/camera_utils';
 import '@tensorflow/tfjs-backend-webgl';
 import JitsiMeetJS from '../../../base/lib-jitsi-meet';
 import ReducerRegistry from '../../../base/redux/ReducerRegistry';
+
+// Define single-hand and two-hand signs
+const SINGLE_HAND_SIGNS = ['C', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10'];
+const TWO_HAND_SIGNS = ['A', 'B', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z'];
 
 // Redux reducer for sign language subtitles
 interface SignLanguageState {
@@ -68,10 +73,12 @@ const extractKeypoints = (results: HandResults | null): KeypointFrame => {
   const rightHand = new Array(LANDMARK_COUNT * COORDS_PER_LANDMARK).fill(0);
 
   if (!results || !results.multiHandLandmarks || !results.multiHandedness) {
+    console.log('No hands detected, returning zero keypoints');
     return [...leftHand, ...rightHand] as KeypointFrame;
   }
 
   const handCount = Math.min(results.multiHandLandmarks.length, results.multiHandedness.length);
+  console.log(`Detected ${handCount} hand(s)`);
   for (let idx = 0; idx < handCount; idx++) {
     const landmarks = results.multiHandLandmarks[idx];
     const handednessData = results.multiHandedness[idx];
@@ -81,10 +88,12 @@ const extractKeypoints = (results: HandResults | null): KeypointFrame => {
       .flat();
 
     if (keypoints.length !== LANDMARK_COUNT * COORDS_PER_LANDMARK) {
+      console.warn(`Invalid keypoint length for hand ${idx}: ${keypoints.length}`);
       continue;
     }
 
     if (!handednessData || !handednessData.label) {
+      console.log('No handedness data, assigning to right hand');
       keypoints.forEach((val, i) => (rightHand[i] = val));
       continue;
     }
@@ -95,6 +104,14 @@ const extractKeypoints = (results: HandResults | null): KeypointFrame => {
     } else {
       keypoints.forEach((val, i) => (rightHand[i] = val));
     }
+  }
+
+  // Log keypoints for single-hand cases
+  if (handCount === 1) {
+    console.log('Single hand detected:', {
+      leftHand: leftHand.some(val => Math.abs(val) > 0.001) ? leftHand : 'zeros',
+      rightHand: rightHand.some(val => Math.abs(val) > 0.001) ? rightHand : 'zeros',
+    });
   }
 
   return [...leftHand, ...rightHand] as KeypointFrame;
@@ -324,24 +341,29 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
   }, [dispatch]);
 
   // Validate sequence to ensure it contains meaningful data
-  const isValidSequence = (sequence: number[][]): boolean => {
-    // Check if at least one frame has non-zero keypoints for at least one hand
-    const hasValidFrame = sequence.some(frame => {
+  const isValidSequence = (sequence: number[][], expectedSign?: string): boolean => {
+    // If no expected sign is provided, use recent predictions to determine hand requirements
+    const requiresTwoHands = expectedSign
+      ? TWO_HAND_SIGNS.includes(expectedSign)
+      : predictionsRef.current.some(p => TWO_HAND_SIGNS.includes(p.label));
+
+    return sequence.some(frame => {
       const leftHand = frame.slice(0, 63);
       const rightHand = frame.slice(63, 126);
       const leftNonZero = leftHand.some(val => Math.abs(val) > 0.001);
       const rightNonZero = rightHand.some(val => Math.abs(val) > 0.001);
-      return leftNonZero || rightNonZero;
+      return requiresTwoHands ? leftNonZero && rightNonZero : leftNonZero || rightNonZero;
     });
-    return hasValidFrame;
   };
 
   // Preprocess frame
   const preprocessFrame = async (results: HandResults): Promise<tf.Tensor | null> => {
     if (!handsRef.current || !results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
+      console.log('No hands detected, skipping prediction');
       return null; // Skip prediction if no hands detected
     }
 
+    const handCount = results.multiHandLandmarks.length;
     const tensor = tf.tidy(() => {
       const keypoints = extractKeypoints(results);
       sequenceRef.current.push(keypoints);
@@ -351,14 +373,23 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
       const paddedSequence = sequenceRef.current.length < 30
         ? [...new Array(30 - sequenceRef.current.length).fill(new Array(126).fill(0)), ...sequenceRef.current]
         : sequenceRef.current;
+
+      // Check if sequence is valid
       if (!isValidSequence(paddedSequence)) {
-        return tf.zeros([1, 30, 126]); // Return a zero tensor as a valid TensorContainer
+        console.log('Invalid sequence, returning zero tensor');
+        return tf.zeros([1, 30, 126]);
       }
+
+      // Reject two-hand signs if only one hand is detected
+      if (handCount < 2 && predictionsRef.current.some(p => TWO_HAND_SIGNS.includes(p.label))) {
+        console.log('Two-hand sign expected but only one hand detected, returning zero tensor');
+        return tf.zeros([1, 30, 126]);
+      }
+
       const normalizedSequence = normalizeKeypoints(paddedSequence as KeypointSequence);
       return tf.tensor3d([normalizedSequence], [1, 30, 126]);
     });
 
-    // Check if the result is a zero tensor (indicating invalid sequence)
     const isZeroTensor = tf.equal(tensor, tf.zeros([1, 30, 126])).all().dataSync()[0];
     if (isZeroTensor) {
       tensor.dispose();
@@ -371,6 +402,7 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
   // Predict sign with majority voting
   const predictSign = async (tensor: tf.Tensor): Promise<{ label: string; confidence: number }> => {
     if (!model || !labels.length) {
+      console.error('Model or labels not loaded');
       return { label: 'Model or labels not loaded', confidence: 0 };
     }
     try {
@@ -381,9 +413,21 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
       ]);
       const labelIndex = labelIndexTensor[0];
       const confidence = probs[labelIndex];
-      console.log(`Prediction: ${labels[labelIndex]}, Prediction confidence: ${confidence}`);
+      const predictedLabel = labels[labelIndex];
+
+      // Check if the predicted label requires two hands
+      if (TWO_HAND_SIGNS.includes(predictedLabel)) {
+        const sequenceValidForTwoHands = isValidSequence(sequenceRef.current, predictedLabel);
+        if (!sequenceValidForTwoHands) {
+          console.log(`Predicted two-hand sign ${predictedLabel} but sequence lacks both hands; defaulting to BACKGROUND`);
+          prediction.dispose();
+          return { label: 'BACKGROUND', confidence: 1.0 };
+        }
+      }
+
+      console.log(`Prediction: ${predictedLabel}, Confidence: ${confidence}`);
       prediction.dispose();
-      return { label: confidence > 0.95 ? labels[labelIndex] : 'BACKGROUND', confidence };
+      return { label: confidence > 0.95 ? predictedLabel : 'BACKGROUND', confidence };
     } catch (error) {
       console.error('Prediction error:', error);
       return { label: 'Prediction failed', confidence: 0 };
@@ -407,6 +451,15 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
     if (!conference) return null;
     const localTracks = conference.getLocalTracks();
     const videoTrack = localTracks.find(track => track.getType() === 'video');
+    if (videoTrack && videoTrack.isVideoTrack()) {
+        const mediaStreamTrack = videoTrack.getTrack();
+        if (mediaStreamTrack && mediaStreamTrack.readyState === 'live') {
+          const settings = mediaStreamTrack.getSettings();
+          console.log(`Video track resolution: ${settings.width}x${settings.height}`);
+        } else {
+          console.warn('Video track is not live or unavailable');
+        }
+      }
     return videoTrack || null;
   };
 
@@ -603,6 +656,7 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
 
         // Skip prediction if no hands are detected
         if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
+          console.log('No hands detected, pushing BACKGROUND prediction');
           predictionsRef.current.push({ label: 'BACKGROUND', confidence: 1.0 });
           if (predictionsRef.current.length > 10) predictionsRef.current.shift();
           if (unknownStartTimeRef.current === null) {
@@ -619,8 +673,14 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
           return;
         }
 
+        // Log single-hand detection
+        if (results.multiHandLandmarks.length === 1) {
+          console.log('Single hand detected, checking for single-hand signs');
+        }
+
         const tensor = await preprocessFrame(results);
         if (!tensor) {
+          console.log('No valid tensor, pushing BACKGROUND prediction');
           predictionsRef.current.push({ label: 'BACKGROUND', confidence: 1.0 });
           if (predictionsRef.current.length > 10) predictionsRef.current.shift();
           APP.conference._room.sendCommand('sign_language', { value: 'BACKGROUND' });
@@ -631,6 +691,9 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
         const prediction = await predictSign(tensor);
         predictionsRef.current.push(prediction);
         if (predictionsRef.current.length > 10) predictionsRef.current.shift();
+
+        // Log prediction for debugging
+        console.log('Prediction result:', prediction);
 
         // Majority voting for stability
         const predictionCounts: { [key: string]: { count: number; totalConfidence: number } } = {};
@@ -648,7 +711,6 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
         const stablePrediction = mostCommon[0];
         const avgConfidence = mostCommon[1].totalConfidence / mostCommon[1].count;
 
-        // Only accept stable prediction if it has sufficient confidence and occurrences
         const isStable = mostCommon[1].count >= 8 && avgConfidence > 0.95;
 
         if (isStable && (stablePrediction === 'BACKGROUND' || stablePrediction === 'Unknown')) {
@@ -666,8 +728,15 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
           updateSubtitles('');
         } else if (isStable && stablePrediction !== 'BACKGROUND') {
           unknownStartTimeRef.current = null;
-          APP.conference._room.sendCommand('sign_language', { value: stablePrediction });
-          updateSubtitles(stablePrediction);
+          // Verify hand count for two-hand signs
+          if (TWO_HAND_SIGNS.includes(stablePrediction) && results.multiHandLandmarks.length < 2) {
+            console.log(`Stable prediction ${stablePrediction} is a two-hand sign but only ${results.multiHandLandmarks.length} hand(s) detected; defaulting to BACKGROUND`);
+            APP.conference._room.sendCommand('sign_language', { value: 'BACKGROUND' });
+            updateSubtitles('');
+          } else {
+            APP.conference._room.sendCommand('sign_language', { value: stablePrediction });
+            updateSubtitles(stablePrediction);
+          }
         }
 
         tensor.dispose();
