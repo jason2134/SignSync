@@ -11,8 +11,8 @@ import JitsiMeetJS from '../../../base/lib-jitsi-meet';
 import ReducerRegistry from '../../../base/redux/ReducerRegistry';
 
 // Define single-hand and two-hand signs
-const SINGLE_HAND_SIGNS = ['C', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10'];
-const TWO_HAND_SIGNS = ['A', 'B', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z'];
+const SINGLE_HAND_SIGNS = ['C', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'SPACE'];
+const TWO_HAND_SIGNS = ['A', 'B', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'BACKSPACE'];
 
 // Redux reducer for sign language subtitles
 interface SignLanguageState {
@@ -266,7 +266,7 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
         await tf.setBackend('webgl');
 
         // Load model
-        const modelPath = `static/sign_language_model_tfjs_conv/model.json`;
+        const modelPath = `static/tfjs_model_converted_20_06/model.json`; // static/tfjs_model_converted_20_06/model.json / static/sign_language_model_tfjs_conv/model.json
         const loadedModel = await tf.loadLayersModel(modelPath);
 
         // Warm up model
@@ -711,7 +711,7 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
         const stablePrediction = mostCommon[0];
         const avgConfidence = mostCommon[1].totalConfidence / mostCommon[1].count;
 
-        const isStable = mostCommon[1].count >= 8 && avgConfidence > 0.95;
+        const isStable = mostCommon[1].count >= 15 && avgConfidence > 0.95;
 
         if (isStable && (stablePrediction === 'BACKGROUND' || stablePrediction === 'Unknown')) {
           if (!unknownStartTimeRef.current) {
