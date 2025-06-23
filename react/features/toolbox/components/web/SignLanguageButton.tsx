@@ -154,8 +154,11 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
   const unknownStartTimeRef = useRef<number | null>(null);
   const videoElementRef = useRef<HTMLVideoElement | null>(null);
   const isCleanedUp = useRef<boolean>(false);
+  const backgroundCountRef = useRef<number>(0); // Track consecutive BACKGROUND predictions
 
   const THRESHOLD = 0.9;
+  const BACKGROUND_DEBOUNCE_FRAMES = 45; // ~3 seconds at 15fps
+  const TIMEOUT_DURATION = 12000; // Retain 12-second timeout
 
   useEffect(() => {
     const checkDevice = async () => {
@@ -209,7 +212,7 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
 
         await tf.setBackend('webgl');
 
-        const modelPath = `static/tfjs_ann_model_converted_22_06/model.json`;
+        const modelPath = `static/tfjs_ann_model_converted_23_06/model.json`;
         const loadedModel = await tf.loadLayersModel(modelPath);
 
         tf.tidy(() => {
@@ -275,13 +278,18 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
     const requiresTwoHands = expectedSign
       ? TWO_HAND_SIGNS.includes(expectedSign)
       : predictionsRef.current.some(p => TWO_HAND_SIGNS.includes(labels[p]));
-    return sequence.some(frame => {
+    let validFrameCount = 0;
+    for (const frame of sequence) {
       const leftHand = frame.slice(0, 63);
       const rightHand = frame.slice(63, 126);
       const leftNonZero = leftHand.some(val => Math.abs(val) > 0.001);
       const rightNonZero = rightHand.some(val => Math.abs(val) > 0.001);
-      return requiresTwoHands ? leftNonZero && rightNonZero : leftNonZero || rightNonZero;
-    });
+      if (requiresTwoHands ? leftNonZero && rightNonZero : leftNonZero || rightNonZero) {
+        validFrameCount++;
+      }
+    }
+    // Require at least 50% of frames to be valid to consider the sequence valid
+    return validFrameCount >= sequence.length * 0.5;
   };
 
   const preprocessFrame = async (results: HandResults): Promise<tf.Tensor | null> => {
@@ -493,15 +501,19 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
           console.log('No hands detected, pushing BACKGROUND prediction');
           predictionsRef.current.push(labels.indexOf('BACKGROUND'));
           if (predictionsRef.current.length > 10) predictionsRef.current.shift();
-          if (unknownStartTimeRef.current === null) {
-            unknownStartTimeRef.current = performance.now();
-          }
-          const elapsedTime = performance.now() - (unknownStartTimeRef.current || performance.now());
-          if (elapsedTime >= 12000) {
-            dispatch({ type: 'CLEAR_SIGN_LANGUAGE_SUBTITLES' });
-            unknownStartTimeRef.current = null;
-            predictionsRef.current = [];
-            sentenceRef.current = [];
+          backgroundCountRef.current += 1;
+          if (backgroundCountRef.current >= BACKGROUND_DEBOUNCE_FRAMES) {
+            if (unknownStartTimeRef.current === null) {
+              unknownStartTimeRef.current = performance.now();
+            }
+            const elapsedTime = performance.now() - (unknownStartTimeRef.current || performance.now());
+            if (elapsedTime >= TIMEOUT_DURATION) {
+              dispatch({ type: 'CLEAR_SIGN_LANGUAGE_SUBTITLES' });
+              unknownStartTimeRef.current = null;
+              predictionsRef.current = [];
+              sentenceRef.current = [];
+              backgroundCountRef.current = 0;
+            }
           }
           APP.conference._room.sendCommand('sign_language', { value: 'BACKGROUND' });
           updateSubtitles('');
@@ -513,6 +525,20 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
           console.log('No valid tensor, pushing BACKGROUND prediction');
           predictionsRef.current.push(labels.indexOf('BACKGROUND'));
           if (predictionsRef.current.length > 10) predictionsRef.current.shift();
+          backgroundCountRef.current += 1;
+          if (backgroundCountRef.current >= BACKGROUND_DEBOUNCE_FRAMES) {
+            if (unknownStartTimeRef.current === null) {
+              unknownStartTimeRef.current = performance.now();
+            }
+            const elapsedTime = performance.now() - (unknownStartTimeRef.current || performance.now());
+            if (elapsedTime >= TIMEOUT_DURATION) {
+              dispatch({ type: 'CLEAR_SIGN_LANGUAGE_SUBTITLES' });
+              unknownStartTimeRef.current = null;
+              predictionsRef.current = [];
+              sentenceRef.current = [];
+              backgroundCountRef.current = 0;
+            }
+          }
           APP.conference._room.sendCommand('sign_language', { value: 'BACKGROUND' });
           updateSubtitles('');
           return;
@@ -521,6 +547,12 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
         const prediction = await predictSign(tensor);
         predictionsRef.current.push(labels.indexOf(prediction.label));
         if (predictionsRef.current.length > 10) predictionsRef.current.shift();
+
+        // Reset timeout and background count on valid sign detection
+        if (prediction.label !== 'BACKGROUND' && prediction.confidence > THRESHOLD) {
+          unknownStartTimeRef.current = null;
+          backgroundCountRef.current = 0;
+        }
 
         if (predictionsRef.current.length === 10 && prediction.confidence > THRESHOLD) {
           const mostCommonPrediction = predictionsRef.current.reduce((a, b, i, arr) =>
@@ -538,15 +570,19 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
                 APP.conference._room.sendCommand('sign_language', { value: predictedLabel });
               }
             } else {
-              if (unknownStartTimeRef.current === null) {
-                unknownStartTimeRef.current = performance.now();
-              }
-              const elapsedTime = performance.now() - (unknownStartTimeRef.current || performance.now());
-              if (elapsedTime >= 12000) {
-                dispatch({ type: 'CLEAR_SIGN_LANGUAGE_SUBTITLES' });
-                unknownStartTimeRef.current = null;
-                predictionsRef.current = [];
-                sentenceRef.current = [];
+              backgroundCountRef.current += 1;
+              if (backgroundCountRef.current >= BACKGROUND_DEBOUNCE_FRAMES) {
+                if (unknownStartTimeRef.current === null) {
+                  unknownStartTimeRef.current = performance.now();
+                }
+                const elapsedTime = performance.now() - (unknownStartTimeRef.current || performance.now());
+                if (elapsedTime >= TIMEOUT_DURATION) {
+                  dispatch({ type: 'CLEAR_SIGN_LANGUAGE_SUBTITLES' });
+                  unknownStartTimeRef.current = null;
+                  predictionsRef.current = [];
+                  sentenceRef.current = [];
+                  backgroundCountRef.current = 0;
+                }
               }
               updateSubtitles('');
               APP.conference._room.sendCommand('sign_language', { value: 'BACKGROUND' });
@@ -576,6 +612,7 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
       predictionsRef.current = [];
       sentenceRef.current = [];
       unknownStartTimeRef.current = null;
+      backgroundCountRef.current = 0;
     };
   };
 
