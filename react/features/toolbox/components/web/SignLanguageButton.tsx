@@ -154,11 +154,12 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
   const unknownStartTimeRef = useRef<number | null>(null);
   const videoElementRef = useRef<HTMLVideoElement | null>(null);
   const isCleanedUp = useRef<boolean>(false);
-  const backgroundCountRef = useRef<number>(0); // Track consecutive BACKGROUND predictions
+  const backgroundCountRef = useRef<number>(0);
+  const lastProcessedPredictionRef = useRef<string | null>(null); // Track last processed prediction
 
   const THRESHOLD = 0.9;
-  const BACKGROUND_DEBOUNCE_FRAMES = 45; // ~3 seconds at 15fps
-  const TIMEOUT_DURATION = 12000; // Retain 12-second timeout
+  const BACKGROUND_DEBOUNCE_FRAMES = 45;
+  const TIMEOUT_DURATION = 12000;
 
   useEffect(() => {
     const checkDevice = async () => {
@@ -288,7 +289,6 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
         validFrameCount++;
       }
     }
-    // Require at least 50% of frames to be valid to consider the sequence valid
     return validFrameCount >= sequence.length * 0.5;
   };
 
@@ -517,6 +517,7 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
           }
           APP.conference._room.sendCommand('sign_language', { value: 'BACKGROUND' });
           updateSubtitles('');
+          lastProcessedPredictionRef.current = 'BACKGROUND';
           return;
         }
 
@@ -541,6 +542,7 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
           }
           APP.conference._room.sendCommand('sign_language', { value: 'BACKGROUND' });
           updateSubtitles('');
+          lastProcessedPredictionRef.current = 'BACKGROUND';
           return;
         }
 
@@ -548,7 +550,6 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
         predictionsRef.current.push(labels.indexOf(prediction.label));
         if (predictionsRef.current.length > 10) predictionsRef.current.shift();
 
-        // Reset timeout and background count on valid sign detection
         if (prediction.label !== 'BACKGROUND' && prediction.confidence > THRESHOLD) {
           unknownStartTimeRef.current = null;
           backgroundCountRef.current = 0;
@@ -561,7 +562,11 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
           if (predictionsRef.current.every(p => p === mostCommonPrediction)) {
             const predictedLabel = labels[mostCommonPrediction];
             if (predictedLabel !== 'BACKGROUND') {
-              if (sentenceRef.current.length === 0 || sentenceRef.current[sentenceRef.current.length - 1] !== predictedLabel) {
+              if (
+                lastProcessedPredictionRef.current === 'BACKGROUND' ||
+                sentenceRef.current.length === 0 ||
+                sentenceRef.current[sentenceRef.current.length - 1] !== predictedLabel
+              ) {
                 sentenceRef.current.push(predictedLabel);
                 if (sentenceRef.current.length > 5) {
                   sentenceRef.current.shift();
@@ -569,6 +574,7 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
                 updateSubtitles(predictedLabel);
                 APP.conference._room.sendCommand('sign_language', { value: predictedLabel });
               }
+              lastProcessedPredictionRef.current = predictedLabel;
             } else {
               backgroundCountRef.current += 1;
               if (backgroundCountRef.current >= BACKGROUND_DEBOUNCE_FRAMES) {
@@ -586,6 +592,7 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
               }
               updateSubtitles('');
               APP.conference._room.sendCommand('sign_language', { value: 'BACKGROUND' });
+              lastProcessedPredictionRef.current = 'BACKGROUND';
             }
           }
         }
@@ -613,6 +620,7 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
       sentenceRef.current = [];
       unknownStartTimeRef.current = null;
       backgroundCountRef.current = 0;
+      lastProcessedPredictionRef.current = null;
     };
   };
 
