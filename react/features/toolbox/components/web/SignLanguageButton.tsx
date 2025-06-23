@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef, Component, ErrorInfo } from 'react';
 import { translate } from '../../../base/i18n/functions';
 import { withTranslation, WithTranslation } from 'react-i18next';
@@ -9,6 +8,10 @@ import { Camera } from '@mediapipe/camera_utils';
 import '@tensorflow/tfjs-backend-webgl';
 import JitsiMeetJS from '../../../base/lib-jitsi-meet';
 import ReducerRegistry from '../../../base/redux/ReducerRegistry';
+
+// Define single-hand and two-hand signs
+const SINGLE_HAND_SIGNS = ['C', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'SPACE'];
+const TWO_HAND_SIGNS = ['A', 'B', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'BACKSPACE'];
 
 // Redux reducer for sign language subtitles
 interface SignLanguageState {
@@ -77,11 +80,7 @@ const extractKeypoints = (results: HandResults | null): KeypointFrame => {
       .flat();
 
     if (keypoints.length !== LANDMARK_COUNT * COORDS_PER_LANDMARK) {
-      continue;
-    }
-
-    if (!handednessData || !handednessData.label) {
-      keypoints.forEach((val, i) => (rightHand[i] = val));
+      console.warn(`Invalid keypoint length for hand ${idx}: ${keypoints.length}`);
       continue;
     }
 
@@ -91,14 +90,6 @@ const extractKeypoints = (results: HandResults | null): KeypointFrame => {
     } else {
       rightHand.splice(0, keypoints.length, ...keypoints);
     }
-  }
-
-  // Log keypoints for single-hand cases
-  if (handCount === 1) {
-    console.log('Single hand detected:', {
-      leftHand: leftHand.some(val => Math.abs(val) > 0.001) ? leftHand : 'zeros',
-      rightHand: rightHand.some(val => Math.abs(val) > 0.001) ? rightHand : 'zeros',
-    });
   }
 
   return [...leftHand, ...rightHand] as KeypointFrame;
@@ -283,22 +274,28 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
     };
   }, [dispatch]);
 
-  // Validate sequence to ensure it contains meaningful data
-  const isValidSequence = (sequence: number[][]): boolean => {
-    // Check if at least one frame has non-zero keypoints for at least one hand
-    const hasValidFrame = sequence.some(frame => {
+  const isValidSequence = (sequence: number[][], expectedSign?: string): boolean => {
+    const requiresTwoHands = expectedSign
+      ? TWO_HAND_SIGNS.includes(expectedSign)
+      : predictionsRef.current.some(p => TWO_HAND_SIGNS.includes(labels[p]));
+    let validFrameCount = 0;
+    for (const frame of sequence) {
       const leftHand = frame.slice(0, 63);
       const rightHand = frame.slice(63, 126);
       const leftNonZero = leftHand.some(val => Math.abs(val) > 0.001);
       const rightNonZero = rightHand.some(val => Math.abs(val) > 0.001);
-      return leftNonZero || rightNonZero;
-    });
-    return hasValidFrame;
+      if (requiresTwoHands ? leftNonZero && rightNonZero : leftNonZero || rightNonZero) {
+        validFrameCount++;
+      }
+    }
+    // Require at least 50% of frames to be valid to consider the sequence valid
+    return validFrameCount >= sequence.length * 0.5;
   };
 
   const preprocessFrame = async (results: HandResults): Promise<tf.Tensor | null> => {
     if (!handsRef.current || !results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
-      return null; // Skip prediction if no hands detected
+      console.log('No hands detected, skipping prediction');
+      return null;
     }
 
     const handCount = results.multiHandLandmarks.length;
@@ -311,16 +308,23 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
       const paddedSequence = sequenceRef.current.length < 30
         ? [...new Array(30 - sequenceRef.current.length).fill(new Array(126).fill(0)), ...sequenceRef.current]
         : sequenceRef.current;
+
       if (!isValidSequence(paddedSequence)) {
-        return tf.zeros([1, 30, 126]); // Return a zero tensor as a valid TensorContainer
+        console.log('Invalid sequence, returning zero tensor');
+        return tf.zeros([1, 30 * 126]);
       }
+
+      if (handCount < 2 && predictionsRef.current.some(p => TWO_HAND_SIGNS.includes(labels[p]))) {
+        console.log('Two-hand sign expected but only one hand detected, returning zero tensor');
+        return tf.zeros([1, 30 * 126]);
+      }
+
       const normalizedSequence = normalizeKeypoints(paddedSequence as KeypointSequence);
       const window = normalizedSequence.flat();
       return tf.tensor2d([window], [1, 30 * 126]);
     });
 
-    // Check if the result is a zero tensor (indicating invalid sequence)
-    const isZeroTensor = tf.equal(tensor, tf.zeros([1, 30, 126])).all().dataSync()[0];
+    const isZeroTensor = tf.equal(tensor, tf.zeros([1, 30 * 126])).all().dataSync()[0];
     if (isZeroTensor) {
       tensor.dispose();
       return null;
@@ -342,9 +346,19 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
       ]);
       const labelIndex = labelIndexTensor[0];
       const confidence = probs[labelIndex];
-      console.log(`Prediction: ${labels[labelIndex]}, Prediction confidence: ${confidence}`);
+      const predictedLabel = labels[labelIndex];
+
+      if (TWO_HAND_SIGNS.includes(predictedLabel)) {
+        const sequenceValidForTwoHands = isValidSequence(sequenceRef.current, predictedLabel);
+        if (!sequenceValidForTwoHands) {
+          console.log(`Predicted two-hand sign ${predictedLabel} but sequence lacks both hands; defaulting to BACKGROUND`);
+          prediction.dispose();
+          return { label: 'BACKGROUND', confidence: 1.0 };
+        }
+      }
+
       prediction.dispose();
-      return { label: confidence > 0.95 ? labels[labelIndex] : 'BACKGROUND', confidence };
+      return { label: predictedLabel, confidence };
     } catch (error) {
       console.error('Prediction error:', error);
       return { label: 'Prediction failed', confidence: 0 };
@@ -366,6 +380,15 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
     if (!conference) return null;
     const localTracks = conference.getLocalTracks();
     const videoTrack = localTracks.find(track => track.getType() === 'video');
+    if (videoTrack && videoTrack.isVideoTrack()) {
+      const mediaStreamTrack = videoTrack.getTrack();
+      if (mediaStreamTrack && mediaStreamTrack.readyState === 'live') {
+        const settings = mediaStreamTrack.getSettings();
+        console.log(`Video track resolution: ${settings.width}x${settings.height}`);
+      } else {
+        console.warn('Video track is not live or unavailable');
+      }
+    }
     return videoTrack || null;
   };
 
@@ -475,7 +498,8 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
     handsRef.current?.onResults(async (results: HandResults) => {
       try {
         if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
-          predictionsRef.current.push({ label: 'BACKGROUND', confidence: 1.0 });
+          console.log('No hands detected, pushing BACKGROUND prediction');
+          predictionsRef.current.push(labels.indexOf('BACKGROUND'));
           if (predictionsRef.current.length > 10) predictionsRef.current.shift();
           backgroundCountRef.current += 1;
           if (backgroundCountRef.current >= BACKGROUND_DEBOUNCE_FRAMES) {
@@ -496,14 +520,10 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
           return;
         }
 
-        // Log single-hand detection
-        if (results.multiHandLandmarks.length === 1) {
-          console.log('Single hand detected, checking for single-hand signs');
-        }
-
         const tensor = await preprocessFrame(results);
         if (!tensor) {
-          predictionsRef.current.push({ label: 'BACKGROUND', confidence: 1.0 });
+          console.log('No valid tensor, pushing BACKGROUND prediction');
+          predictionsRef.current.push(labels.indexOf('BACKGROUND'));
           if (predictionsRef.current.length > 10) predictionsRef.current.shift();
           backgroundCountRef.current += 1;
           if (backgroundCountRef.current >= BACKGROUND_DEBOUNCE_FRAMES) {
@@ -528,45 +548,46 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
         predictionsRef.current.push(labels.indexOf(prediction.label));
         if (predictionsRef.current.length > 10) predictionsRef.current.shift();
 
-        // Log prediction for debugging
-        console.log('Prediction result:', prediction);
+        // Reset timeout and background count on valid sign detection
+        if (prediction.label !== 'BACKGROUND' && prediction.confidence > THRESHOLD) {
+          unknownStartTimeRef.current = null;
+          backgroundCountRef.current = 0;
+        }
 
-        // Majority voting for stability
-        const predictionCounts: { [key: string]: { count: number; totalConfidence: number } } = {};
-        predictionsRef.current.forEach(p => {
-          if (!predictionCounts[p.label]) {
-            predictionCounts[p.label] = { count: 0, totalConfidence: 0 };
-          }
-          predictionCounts[p.label].count += 1;
-          predictionCounts[p.label].totalConfidence += p.confidence;
-        });
-
-        const mostCommon = Object.entries(predictionCounts).reduce((a, b) =>
-          a[1].count > b[1].count || (a[1].count === b[1].count && a[1].totalConfidence > b[1].totalConfidence) ? a : b
-        );
-        const stablePrediction = mostCommon[0];
-        const avgConfidence = mostCommon[1].totalConfidence / mostCommon[1].count;
-
-        // Only accept stable prediction if it has sufficient confidence and occurrences
-        const isStable = mostCommon[1].count >= 8 && avgConfidence > 0.95;
-
-        if (isStable && (stablePrediction === 'BACKGROUND' || stablePrediction === 'Unknown')) {
-          if (!unknownStartTimeRef.current) {
-            unknownStartTimeRef.current = performance.now();
-          } else {
-            const elapsedTime = performance.now() - unknownStartTimeRef.current;
-            if (elapsedTime >= 8000) {
-              dispatch({ type: 'CLEAR_SIGN_LANGUAGE_SUBTITLES' });
-              unknownStartTimeRef.current = null;
-              predictionsRef.current = [];
+        if (predictionsRef.current.length === 10 && prediction.confidence > THRESHOLD) {
+          const mostCommonPrediction = predictionsRef.current.reduce((a, b, i, arr) =>
+            arr.filter(x => x === a).length >= arr.filter(x => x === b).length ? a : b
+          );
+          if (predictionsRef.current.every(p => p === mostCommonPrediction)) {
+            const predictedLabel = labels[mostCommonPrediction];
+            if (predictedLabel !== 'BACKGROUND') {
+              if (sentenceRef.current.length === 0 || sentenceRef.current[sentenceRef.current.length - 1] !== predictedLabel) {
+                sentenceRef.current.push(predictedLabel);
+                if (sentenceRef.current.length > 5) {
+                  sentenceRef.current.shift();
+                }
+                updateSubtitles(predictedLabel);
+                APP.conference._room.sendCommand('sign_language', { value: predictedLabel });
+              }
+            } else {
+              backgroundCountRef.current += 1;
+              if (backgroundCountRef.current >= BACKGROUND_DEBOUNCE_FRAMES) {
+                if (unknownStartTimeRef.current === null) {
+                  unknownStartTimeRef.current = performance.now();
+                }
+                const elapsedTime = performance.now() - (unknownStartTimeRef.current || performance.now());
+                if (elapsedTime >= TIMEOUT_DURATION) {
+                  dispatch({ type: 'CLEAR_SIGN_LANGUAGE_SUBTITLES' });
+                  unknownStartTimeRef.current = null;
+                  predictionsRef.current = [];
+                  sentenceRef.current = [];
+                  backgroundCountRef.current = 0;
+                }
+              }
+              updateSubtitles('');
+              APP.conference._room.sendCommand('sign_language', { value: 'BACKGROUND' });
             }
           }
-          APP.conference._room.sendCommand('sign_language', { value: 'BACKGROUND' });
-          updateSubtitles('');
-        } else if (isStable && stablePrediction !== 'BACKGROUND') {
-          unknownStartTimeRef.current = null;
-          APP.conference._room.sendCommand('sign_language', { value: stablePrediction });
-          updateSubtitles(stablePrediction);
         }
 
         tensor.dispose();
