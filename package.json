@@ -30,6 +30,7 @@
     "@jitsi/rtcstats": "9.5.1",
     "@matrix-org/olm": "https://gitlab.matrix.org/api/v4/projects/27/packages/npm/@matrix-org/olm/-/@matrix-org/olm-3.2.3.tgz",
     "@mediapipe/camera_utils": "^0.3.1675466862",
+    "@mediapipe/drawing_utils": "^0.3.1675466124",
     "@mediapipe/hands": "^0.4.1646424915",
     "@mediapipe/holistic": "^0.5.1675471629",
     "@microsoft/microsoft-graph-client": "3.0.1",

@@ -907,7 +907,12 @@
         "errors": {
             "notUniqueOption": "Options must be unique",
             "initializationFailed": "Failed to initialize sign language recognition.",
-            "deviceUnsupported": "Your device does not support sign language recognition."
+            "deviceUnsupported": "Your device does not support sign language recognition.",
+            "videoPlayFailed": "Failed to play video feed.",
+            "webcamAccessFailed": "Unable to access webcam.",
+            "cameraStartFailed": "Failed to start camera.",
+            "frameProcessingFailed": "Error processing video frames.",
+            "conferenceNotJoined": "Please join a conference to enable sign language detection."
         },
         "notification": {
             "description": "Open polls tab to vote",
@@ -1410,7 +1415,10 @@
         "videounmute": "Start camera"
     },
     "signLanguage": {
-        "prediction": "Sign"
+        "prediction": "Sign",
+        "disableListenOnlyFirst": "Please disable Listen Only mode first.",
+        "error": "Sign Language Error",
+        "unexpectedError": "An unexpected error occurred."
       },
     "transcribing": {
         "ccButtonTooltip": "Start / Stop subtitles",
