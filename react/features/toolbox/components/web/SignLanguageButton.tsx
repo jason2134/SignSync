@@ -213,7 +213,7 @@ const SignLanguageButton: React.FC<ButtonProps> = ({ t, 'aria-label': ariaLabel,
 
         await tf.setBackend('webgl');
 
-        const modelPath = `static/tfjs_final_ann_model_24_06/model.json`;
+        const modelPath = `static/1tfjs_final_ann_model_24_06/model.json`;
         const loadedModel = await tf.loadLayersModel(modelPath);
 
         tf.tidy(() => {
