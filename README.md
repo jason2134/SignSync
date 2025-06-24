@@ -63,8 +63,10 @@ By making video communication accessible to the D/HH community, SignSync doesn�
 ## 👥 Authors / Contributors
 •	Chong Fai (Jason) Wong
 <a href='https://www.linkedin.com/in/jasonwcf/'>LinkedIn</a> | <a href='https://github.com/jason2134'>GitHub</a>
+<br>
 •	Robayed Ashraf
 <a href='https://www.linkedin.com/in/robayedashraf/'>LinkedIn</a> | <a href='https://github.com/robayedl'>GitHub</a>
+<br>
 •	Asim Santos Poudel
 <a href='https://www.linkedin.com/in/asimsantos/'>LinkedIn</a> | <a href='https://github.com/asimsantos'>GitHub</a>
 
