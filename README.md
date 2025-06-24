@@ -60,3 +60,16 @@ Display translated text on subtitle overlay.
 ## 🙌 Why It Matters
 By making video communication accessible to the D/HH community, SignSync doesn’t just enable conversation—it promotes inclusion, equity, and visibility.
 
+## 👥 Authors / Contributors
+•	Chong Fai (Jason) Wong
+<a href='https://www.linkedin.com/in/jasonwcf/'>LinkedIn</a> | <a href='https://github.com/jason2134'>GitHub</a>
+•	Robayed Ashraf
+<a href='https://www.linkedin.com/in/robayedashraf/'>LinkedIn</a> | <a href='https://github.com/robayedl'>GitHub</a>
+•	Asim Santos Poudel
+<a href='https://www.linkedin.com/in/asimsantos/'>LinkedIn</a> | <a href='https://github.com/asimsantos'>GitHub</a>
+
+This project was undertaken under the supervision and mentorship of Dr. Nabin Sharma at the University of Technology Sydney (UTS).
+
+## 🏆 Awards
+Selected for UTS AI Showcase 2025
+https://utsfeitshowcases.org/ai-showcase/
