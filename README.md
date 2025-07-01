@@ -20,7 +20,7 @@ As part of an inclusive future, SignSync empowers the D/HH community by allowing
 While tools like Zoom and Microsoft Teams excel in text and voice communication, they lack built-in support for real-time sign language interpretation. That’s the gap we’re aiming to bridge.
 
 ## 🧩 Demo
-🎥 [Checkout the full demo video here!](https://www.youtube.com/watch?v=Dt-oRFbHSq4)
+🎥 [Checkout the full demo video here](https://www.youtube.com/watch?v=Dt-oRFbHSq4)
 
 https://github.com/user-attachments/assets/6e72e9d0-24b4-4031-8f77-e6be26ad2fa0
 
